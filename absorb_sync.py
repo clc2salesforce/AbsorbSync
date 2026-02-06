@@ -30,101 +30,94 @@ except ImportError:
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
     
-    def __init__(self, api_url: str, api_key: str, username: str = None, password: str = None):
+    def __init__(self, api_url: str, api_key: str, username: str = None, password: str = None, private_key: str = None):
         """
         Initialize the Absorb LMS client.
         
         Args:
             api_url: Base URL for the Absorb LMS API
-            api_key: API key for X-Absorb-API-Key header
-            username: API username (optional, for OAuth)
-            password: API password (optional, for OAuth)
+            api_key: API key for x-api-key header
+            username: API username (optional, for token authentication)
+            password: API password (optional, for token authentication)
+            private_key: Private key GUID (optional, for token authentication)
         """
         self.api_url = api_url.rstrip('/')
         self.api_key = api_key
         self.username = username
         self.password = password
+        self.private_key = private_key
         self.session = requests.Session()
         # Set the API key header for all requests
         self.session.headers.update({
-            "X-Absorb-API-Key": self.api_key
+            "x-api-key": self.api_key,
+            "x-api-version": "2"
         })
         self.token = None
-        self.use_oauth = bool(username and password)
+        self.use_token_auth = bool(username and password and private_key)
         
     def authenticate(self) -> bool:
         """
-        Authenticate with the Absorb LMS API.
+        Authenticate with the Absorb LMS REST API v2.
         
-        If username and password are provided, attempts OAuth authentication.
-        Otherwise, relies on API key authentication only.
+        Uses the /authenticate endpoint which requires:
+        - x-api-key header (already set)
+        - x-api-version header set to "2" (already set)
+        - POST body with username, password, and privateKey
         
-        Note: The X-Absorb-API-Key header must be set (done in __init__)
+        Returns an authentication token that must be used in subsequent API calls.
         
         Returns:
             bool: True if authentication successful, False otherwise
         """
-        # If no username/password, rely on API key only
-        if not self.use_oauth:
-            logging.info("Using API key authentication only (no OAuth)")
+        # If no credentials provided, try using API key only
+        if not self.use_token_auth:
+            logging.info("No authentication credentials provided")
+            logging.info("Attempting to use API key only (may not work for all endpoints)")
             return True
         
-        # Try OAuth authentication
-        # The api_url already includes the base path (e.g., /api/rest/v2)
-        # Common OAuth endpoints are /oauth/token or /authentication/token
-        auth_endpoints = [
-            f"{self.api_url}/oauth/token",
-            f"{self.api_url}/authentication/token"
-        ]
+        # Authenticate using the /authenticate endpoint
+        auth_url = f"{self.api_url}/authenticate"
         
         headers = {
-            "Content-Type": "application/x-www-form-urlencoded"
+            "Content-Type": "application/json"
         }
         
-        # OAuth password grant flow
+        # Request body as per REST API documentation
         data = {
-            "grant_type": "password",
             "username": self.username,
-            "password": self.password
+            "password": self.password,
+            "privateKey": self.private_key
         }
         
-        for auth_url in auth_endpoints:
-            try:
-                logging.info(f"Attempting OAuth authentication at: {auth_url}")
-                response = self._retry_request(
-                    method='POST',
-                    url=auth_url,
-                    headers=headers,
-                    data=data
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    self.token = result.get('access_token')
-                    if self.token:
-                        self.session.headers.update({
-                            "Authorization": f"Bearer {self.token}"
-                        })
-                        logging.info(f"OAuth authentication successful using {auth_url}")
-                        return True
-                    else:
-                        logging.warning(f"No access_token in response from {auth_url}")
-                elif response.status_code == 404:
-                    logging.info(f"Endpoint {auth_url} not found, trying next...")
-                    continue
+        try:
+            logging.info("Authenticating with Absorb LMS REST API v2...")
+            response = self._retry_request(
+                method='POST',
+                url=auth_url,
+                headers=headers,
+                json=data
+            )
+            
+            if response.status_code == 200:
+                # The response is the authentication token as a string
+                self.token = response.text.strip('"')  # Remove quotes if present
+                if self.token:
+                    # Set the token for subsequent requests
+                    self.session.headers.update({
+                        "Authorization": f"Bearer {self.token}"
+                    })
+                    logging.info("Authentication successful")
+                    return True
                 else:
-                    logging.warning(f"Authentication failed at {auth_url}: {response.status_code} - {response.text}")
-                    
-            except Exception as e:
-                logging.warning(f"Error trying {auth_url}: {str(e)}")
-                continue
-        
-        # If all OAuth attempts failed, continue with API key only
-        # This is intentional: some Absorb instances may only need the API key
-        # If the API key is also invalid, actual API calls will fail with specific errors
-        logging.warning("OAuth authentication failed, continuing with API key only")
-        logging.warning("If subsequent API calls fail, verify your API key and OAuth credentials")
-        return True
+                    logging.error("Empty token received from authentication endpoint")
+                    return False
+            else:
+                logging.error(f"Authentication failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Authentication error: {str(e)}")
+            return False
     
     def _retry_request(self, method: str, url: str, max_retries: int = 5, 
                       initial_delay: float = 1.0, **kwargs) -> requests.Response:
@@ -333,21 +326,22 @@ def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
         'ABSORB_API_KEY'
     ]
     
-    # Optional keys for OAuth (if not provided, API key only auth is used)
+    # Optional keys for token authentication (if not provided, API key only is used)
     optional_keys = [
         'ABSORB_API_USERNAME',
-        'ABSORB_API_PASSWORD'
+        'ABSORB_API_PASSWORD',
+        'ABSORB_API_PRIVATE_KEY'
     ]
     
     missing_keys = [key for key in required_keys if key not in secrets]
     if missing_keys:
         raise ValueError(f"Missing required secrets: {', '.join(missing_keys)}")
     
-    # Log if OAuth credentials are not provided
+    # Log if authentication credentials are not fully provided
     missing_optional = [key for key in optional_keys if key not in secrets or not secrets[key]]
     if missing_optional:
-        logging.info(f"Optional OAuth credentials not provided: {', '.join(missing_optional)}")
-        logging.info("Will use API key authentication only")
+        logging.info(f"Optional authentication credentials not provided: {', '.join(missing_optional)}")
+        logging.info("Will use API key only (may not work for all endpoints)")
     
     return secrets
 
@@ -485,7 +479,8 @@ def main():
             api_url=secrets['ABSORB_API_URL'],
             api_key=secrets['ABSORB_API_KEY'],
             username=secrets.get('ABSORB_API_USERNAME'),
-            password=secrets.get('ABSORB_API_PASSWORD')
+            password=secrets.get('ABSORB_API_PASSWORD'),
+            private_key=secrets.get('ABSORB_API_PRIVATE_KEY')
         )
         
         # Authenticate
