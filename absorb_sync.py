@@ -107,7 +107,7 @@ class AbsorbLMSClient:
             Exception: If all retries are exhausted
         """
         delay = initial_delay
-        last_exception = None
+        last_error = None
         
         for attempt in range(max_retries):
             try:
@@ -115,31 +115,36 @@ class AbsorbLMSClient:
                 
                 # If we get a rate limit or server error, retry
                 if response.status_code in [429, 500, 502, 503, 504]:
-                    logging.warning(
-                        f"Retry {attempt + 1}/{max_retries} for {method} {url} "
-                        f"(status: {response.status_code})"
-                    )
                     if attempt < max_retries - 1:
+                        logging.warning(
+                            f"Retry {attempt + 1}/{max_retries} for {method} {url} "
+                            f"(status: {response.status_code})"
+                        )
                         time.sleep(delay)
                         delay *= 2  # Exponential backoff
                         continue
+                    else:
+                        # Last attempt failed with retryable status code
+                        raise Exception(
+                            f"Max retries exceeded. Last status: {response.status_code}"
+                        )
                 
                 return response
                 
             except requests.exceptions.RequestException as e:
-                last_exception = e
-                logging.warning(
-                    f"Retry {attempt + 1}/{max_retries} for {method} {url} "
-                    f"(error: {str(e)})"
-                )
+                last_error = str(e)
                 if attempt < max_retries - 1:
+                    logging.warning(
+                        f"Retry {attempt + 1}/{max_retries} for {method} {url} "
+                        f"(error: {last_error})"
+                    )
                     time.sleep(delay)
                     delay *= 2  # Exponential backoff
                 else:
-                    raise Exception(f"Max retries exceeded: {str(e)}")
+                    raise Exception(f"Max retries exceeded: {last_error}")
         
-        if last_exception:
-            raise last_exception
+        # This shouldn't be reached, but as a safety net
+        raise Exception(f"Request failed after {max_retries} attempts")
             
     def get_users(self, page_size: int = 100) -> List[Dict[str, Any]]:
         """
