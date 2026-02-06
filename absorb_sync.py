@@ -142,9 +142,6 @@ class AbsorbLMSClient:
                     delay *= 2  # Exponential backoff
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
-        
-        # This shouldn't be reached, but as a safety net
-        raise Exception(f"Request failed after {max_retries} attempts")
             
     def get_users(self, page_size: int = 100) -> List[Dict[str, Any]]:
         """
