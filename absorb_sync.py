@@ -70,8 +70,8 @@ class AbsorbLMSClient:
             return True
         
         # Try OAuth authentication
-        # Common Absorb LMS v2 OAuth endpoints: /oauth/token or /api/rest/v2/authentication/token
-        # Try the standard OAuth endpoint first
+        # The api_url already includes the base path (e.g., /api/rest/v2)
+        # Common OAuth endpoints are /oauth/token or /authentication/token
         auth_endpoints = [
             f"{self.api_url}/oauth/token",
             f"{self.api_url}/authentication/token"
@@ -119,10 +119,12 @@ class AbsorbLMSClient:
                 logging.warning(f"Error trying {auth_url}: {str(e)}")
                 continue
         
-        # If all OAuth attempts failed, log warning but continue with API key only
+        # If all OAuth attempts failed, continue with API key only
+        # This is intentional: some Absorb instances may only need the API key
+        # If the API key is also invalid, actual API calls will fail with specific errors
         logging.warning("OAuth authentication failed, continuing with API key only")
-        logging.warning("If API calls fail, verify your API key and credentials are correct")
-        return True  # Don't fail completely, let API calls determine if auth is sufficient
+        logging.warning("If subsequent API calls fail, verify your API key and OAuth credentials")
+        return True
     
     def _retry_request(self, method: str, url: str, max_retries: int = 5, 
                       initial_delay: float = 1.0, **kwargs) -> requests.Response:
