@@ -101,10 +101,11 @@ class AbsorbLMSClient:
             **kwargs: Additional arguments to pass to requests
             
         Returns:
-            requests.Response: The response object
+            requests.Response: The response object if successful
             
         Raises:
-            Exception: If all retries are exhausted
+            Exception: If all retries are exhausted, an exception is always raised
+                      rather than returning a response
         """
         delay = initial_delay
         last_error = None
@@ -403,7 +404,7 @@ def main():
     )
     parser.add_argument(
         '--log-file',
-        default=f'logs/absorb_sync_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
+        default=None,
         help='Path to log file (default: logs/absorb_sync_YYYYMMDD_HHMMSS.log)'
     )
     parser.add_argument(
@@ -413,6 +414,10 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Generate default log file name at runtime if not specified
+    if args.log_file is None:
+        args.log_file = f'logs/absorb_sync_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
     
     # Set up logging
     setup_logging(args.log_file)
