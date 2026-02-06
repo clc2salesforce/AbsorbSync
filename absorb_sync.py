@@ -30,26 +30,30 @@ except ImportError:
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
     
-    def __init__(self, api_url: str, username: str, password: str, private_key: str):
+    def __init__(self, api_url: str, api_key: str, username: str, password: str):
         """
         Initialize the Absorb LMS client.
         
         Args:
             api_url: Base URL for the Absorb LMS API
+            api_key: API key for X-Absorb-API-Key header
             username: API username
             password: API password
-            private_key: API private key
         """
         self.api_url = api_url.rstrip('/')
+        self.api_key = api_key
         self.username = username
         self.password = password
-        self.private_key = private_key
         self.session = requests.Session()
+        # Set the API key header for all requests
+        self.session.headers.update({
+            "X-Absorb-API-Key": self.api_key
+        })
         self.token = None
         
     def authenticate(self) -> bool:
         """
-        Authenticate with the Absorb LMS API.
+        Authenticate with the Absorb LMS API using OAuth.
         
         Returns:
             bool: True if authentication successful, False otherwise
@@ -61,7 +65,6 @@ class AbsorbLMSClient:
         data = {
             "username": self.username,
             "password": self.password,
-            "privateKey": self.private_key,
             "grant_type": "password"
         }
         
@@ -292,9 +295,9 @@ def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
     # Validate required secrets
     required_keys = [
         'ABSORB_API_URL',
+        'ABSORB_API_KEY',
         'ABSORB_API_USERNAME',
-        'ABSORB_API_PASSWORD',
-        'ABSORB_API_PRIVATE_KEY'
+        'ABSORB_API_PASSWORD'
     ]
     
     missing_keys = [key for key in required_keys if key not in secrets]
@@ -435,9 +438,9 @@ def main():
         logging.info("Initializing Absorb LMS client...")
         client = AbsorbLMSClient(
             api_url=secrets['ABSORB_API_URL'],
+            api_key=secrets['ABSORB_API_KEY'],
             username=secrets['ABSORB_API_USERNAME'],
-            password=secrets['ABSORB_API_PASSWORD'],
-            private_key=secrets['ABSORB_API_PRIVATE_KEY']
+            password=secrets['ABSORB_API_PASSWORD']
         )
         
         # Authenticate
