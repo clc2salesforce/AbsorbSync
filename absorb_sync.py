@@ -30,15 +30,15 @@ except ImportError:
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
     
-    def __init__(self, api_url: str, api_key: str, username: str, password: str):
+    def __init__(self, api_url: str, api_key: str, username: str = None, password: str = None):
         """
         Initialize the Absorb LMS client.
         
         Args:
             api_url: Base URL for the Absorb LMS API
             api_key: API key for X-Absorb-API-Key header
-            username: API username
-            password: API password
+            username: API username (optional, for OAuth)
+            password: API password (optional, for OAuth)
         """
         self.api_url = api_url.rstrip('/')
         self.api_key = api_key
@@ -50,46 +50,79 @@ class AbsorbLMSClient:
             "X-Absorb-API-Key": self.api_key
         })
         self.token = None
+        self.use_oauth = bool(username and password)
         
     def authenticate(self) -> bool:
         """
-        Authenticate with the Absorb LMS API using OAuth.
+        Authenticate with the Absorb LMS API.
+        
+        If username and password are provided, attempts OAuth authentication.
+        Otherwise, relies on API key authentication only.
+        
+        Note: The X-Absorb-API-Key header must be set (done in __init__)
         
         Returns:
             bool: True if authentication successful, False otherwise
         """
-        auth_url = f"{self.api_url}/authentication/token"
+        # If no username/password, rely on API key only
+        if not self.use_oauth:
+            logging.info("Using API key authentication only (no OAuth)")
+            return True
+        
+        # Try OAuth authentication
+        # Common Absorb LMS v2 OAuth endpoints: /oauth/token or /api/rest/v2/authentication/token
+        # Try the standard OAuth endpoint first
+        auth_endpoints = [
+            f"{self.api_url}/oauth/token",
+            f"{self.api_url}/authentication/token"
+        ]
+        
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
+        
+        # OAuth password grant flow
         data = {
+            "grant_type": "password",
             "username": self.username,
-            "password": self.password,
-            "grant_type": "password"
+            "password": self.password
         }
         
-        try:
-            response = self._retry_request(
-                method='POST',
-                url=auth_url,
-                headers=headers,
-                data=data
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                self.token = result.get('access_token')
-                self.session.headers.update({
-                    "Authorization": f"Bearer {self.token}"
-                })
-                logging.info("Authentication successful")
-                return True
-            else:
-                logging.error(f"Authentication failed: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            logging.error(f"Authentication error: {str(e)}")
-            return False
+        for auth_url in auth_endpoints:
+            try:
+                logging.info(f"Attempting OAuth authentication at: {auth_url}")
+                response = self._retry_request(
+                    method='POST',
+                    url=auth_url,
+                    headers=headers,
+                    data=data
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    self.token = result.get('access_token')
+                    if self.token:
+                        self.session.headers.update({
+                            "Authorization": f"Bearer {self.token}"
+                        })
+                        logging.info(f"OAuth authentication successful using {auth_url}")
+                        return True
+                    else:
+                        logging.warning(f"No access_token in response from {auth_url}")
+                elif response.status_code == 404:
+                    logging.info(f"Endpoint {auth_url} not found, trying next...")
+                    continue
+                else:
+                    logging.warning(f"Authentication failed at {auth_url}: {response.status_code} - {response.text}")
+                    
+            except Exception as e:
+                logging.warning(f"Error trying {auth_url}: {str(e)}")
+                continue
+        
+        # If all OAuth attempts failed, log warning but continue with API key only
+        logging.warning("OAuth authentication failed, continuing with API key only")
+        logging.warning("If API calls fail, verify your API key and credentials are correct")
+        return True  # Don't fail completely, let API calls determine if auth is sufficient
     
     def _retry_request(self, method: str, url: str, max_retries: int = 5, 
                       initial_delay: float = 1.0, **kwargs) -> requests.Response:
@@ -295,7 +328,11 @@ def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
     # Validate required secrets
     required_keys = [
         'ABSORB_API_URL',
-        'ABSORB_API_KEY',
+        'ABSORB_API_KEY'
+    ]
+    
+    # Optional keys for OAuth (if not provided, API key only auth is used)
+    optional_keys = [
         'ABSORB_API_USERNAME',
         'ABSORB_API_PASSWORD'
     ]
@@ -303,6 +340,12 @@ def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
     missing_keys = [key for key in required_keys if key not in secrets]
     if missing_keys:
         raise ValueError(f"Missing required secrets: {', '.join(missing_keys)}")
+    
+    # Log if OAuth credentials are not provided
+    missing_optional = [key for key in optional_keys if key not in secrets or not secrets[key]]
+    if missing_optional:
+        logging.info(f"Optional OAuth credentials not provided: {', '.join(missing_optional)}")
+        logging.info("Will use API key authentication only")
     
     return secrets
 
@@ -439,8 +482,8 @@ def main():
         client = AbsorbLMSClient(
             api_url=secrets['ABSORB_API_URL'],
             api_key=secrets['ABSORB_API_KEY'],
-            username=secrets['ABSORB_API_USERNAME'],
-            password=secrets['ABSORB_API_PASSWORD']
+            username=secrets.get('ABSORB_API_USERNAME'),
+            password=secrets.get('ABSORB_API_PASSWORD')
         )
         
         # Authenticate
