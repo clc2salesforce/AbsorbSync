@@ -436,7 +436,7 @@ def setup_logging(log_file: str = None) -> None:
 
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
-                      use_existing_file: bool = False, skip_count: int = 0) -> tuple:
+                      use_existing_file: bool = False) -> tuple:
     """
     Sync external IDs from 'externalId' field to 'customFields.decimal1' field.
     
@@ -447,7 +447,6 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         filter_blank: If True, only process users with null decimal1
         overwrite: If True, update even if decimal1 already has a value
         use_existing_file: If True, skip download and use existing CSV file
-        skip_count: Counter for skipped users
         
     Returns:
         Tuple of (success_count, error_count, skip_count)
@@ -505,6 +504,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     logging.info("\nProcessing users...")
     success_count = 0
     error_count = 0
+    skip_count = 0  # Initialize as local variable
     
     # Read CSV, process each user, and update CSV incrementally
     temp_csv = None
@@ -651,7 +651,7 @@ def main():
     parser.add_argument(
         '--update',
         action='store_true',
-        help='Actually perform updates (default is dry-run mode)'
+        help='Actually perform updates (default is dry-run mode unless --update is specified)'
     )
     parser.add_argument(
         '--file',
@@ -661,9 +661,14 @@ def main():
     
     args = parser.parse_args()
     
-    # Default to dry-run mode unless --update is specified
-    if not args.update:
+    # Handle dry-run vs update flag precedence
+    # If --update is specified, disable dry-run (unless --dry-run is also explicitly set)
+    if args.update and not args.dry_run:
+        args.dry_run = False
+    elif not args.update:
+        # Default to dry-run mode if --update is not specified
         args.dry_run = True
+    # If both --dry-run and --update are specified, --dry-run takes precedence
     
     # Generate default log file name at runtime if not specified
     if args.log_file is None:
@@ -681,47 +686,28 @@ def main():
         csv_file_path = args.file if args.file else args.csv_file
         use_existing_file = args.file is not None
         
-        # If using existing file, skip authentication
+        # Load secrets and authenticate (needed for both download and update)
+        logging.info(f"Loading secrets from {args.secrets}...")
+        secrets = load_secrets(args.secrets)
+        
+        # Initialize client
+        logging.info("Initializing Absorb LMS client...")
+        client = AbsorbLMSClient(
+            api_url=secrets['ABSORB_API_URL'],
+            api_key=secrets['ABSORB_API_KEY'],
+            username=secrets['ABSORB_API_USERNAME'],
+            password=secrets['ABSORB_API_PASSWORD'],
+            debug=args.debug
+        )
+        
+        # Authenticate
+        logging.info("Authenticating with Absorb LMS...")
+        if not client.authenticate():
+            logging.error("Authentication failed. Exiting.")
+            sys.exit(1)
+        
         if use_existing_file:
             logging.info(f"Using existing CSV file: {csv_file_path}")
-            # Create a minimal client for update operations only
-            logging.info(f"Loading secrets from {args.secrets}...")
-            secrets = load_secrets(args.secrets)
-            
-            logging.info("Initializing Absorb LMS client...")
-            client = AbsorbLMSClient(
-                api_url=secrets['ABSORB_API_URL'],
-                api_key=secrets['ABSORB_API_KEY'],
-                username=secrets['ABSORB_API_USERNAME'],
-                password=secrets['ABSORB_API_PASSWORD'],
-                debug=args.debug
-            )
-            
-            # Authenticate
-            logging.info("Authenticating with Absorb LMS...")
-            if not client.authenticate():
-                logging.error("Authentication failed. Exiting.")
-                sys.exit(1)
-        else:
-            # Load secrets
-            logging.info(f"Loading secrets from {args.secrets}...")
-            secrets = load_secrets(args.secrets)
-            
-            # Initialize client
-            logging.info("Initializing Absorb LMS client...")
-            client = AbsorbLMSClient(
-                api_url=secrets['ABSORB_API_URL'],
-                api_key=secrets['ABSORB_API_KEY'],
-                username=secrets['ABSORB_API_USERNAME'],
-                password=secrets['ABSORB_API_PASSWORD'],
-                debug=args.debug
-            )
-            
-            # Authenticate
-            logging.info("Authenticating with Absorb LMS...")
-            if not client.authenticate():
-                logging.error("Authentication failed. Exiting.")
-                sys.exit(1)
         
         # Sync external IDs
         success_count, error_count, skip_count = sync_external_ids(
