@@ -478,58 +478,70 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     error_count = 0
     
     # Read CSV, process each user, and update CSV incrementally
-    temp_csv = csv_file + '.tmp'
-    with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
-         open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
-        
-        reader = csv.DictReader(f_in)
-        fieldnames = reader.fieldnames
-        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        for row in reader:
-            user_id = row['id']
-            username = row['username']
-            external_id = row['externalId']
-            user_data_json = row['user_data_json']
+    import tempfile
+    temp_dir = os.path.dirname(csv_file) or '.'
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, suffix='.tmp', newline='', encoding='utf-8') as temp_file:
+        temp_csv = temp_file.name
+    
+    try:
+        with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
+             open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
             
-            try:
-                user_data = json.loads(user_data_json)
-            except json.JSONDecodeError as e:
-                logging.error(f"Failed to parse user data for {username}: {e}")
-                row['Status'] = 'Failure'
-                error_count += 1
-                writer.writerow(row)
-                f_out.flush()  # Flush after each row
-                continue
+            reader = csv.DictReader(f_in)
+            fieldnames = reader.fieldnames
+            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+            writer.writeheader()
             
-            logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
-            
-            if dry_run:
-                logging.info(f"[DRY RUN] Would update customFields.decimal1 to: {external_id}")
-                row['Status'] = 'Success'
-                success_count += 1
-            else:
-                if client.update_user(user_data, external_id):
-                    logging.info(f"Successfully updated user {username}")
+            for row in reader:
+                user_id = row['id']
+                username = row['username']
+                external_id = row['externalId']
+                user_data_json = row['user_data_json']
+                
+                try:
+                    user_data = json.loads(user_data_json)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to parse user data for {username}: {e}")
+                    row['Status'] = 'Failure'
+                    error_count += 1
+                    writer.writerow(row)
+                    f_out.flush()  # Flush after each row
+                    continue
+                
+                logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
+                
+                if dry_run:
+                    logging.info(f"[DRY RUN] Would update customFields.decimal1 to: {external_id}")
                     row['Status'] = 'Success'
                     success_count += 1
                 else:
-                    logging.error(f"Failed to update user {username}")
-                    row['Status'] = 'Failure'
-                    error_count += 1
+                    if client.update_user(user_data, external_id):
+                        logging.info(f"Successfully updated user {username}")
+                        row['Status'] = 'Success'
+                        success_count += 1
+                    else:
+                        logging.error(f"Failed to update user {username}")
+                        row['Status'] = 'Failure'
+                        error_count += 1
+                
+                writer.writerow(row)
+                f_out.flush()  # Flush after each row to ensure it's written to disk
             
-            writer.writerow(row)
-            f_out.flush()  # Flush after each row to ensure it's written to disk
+            # Replace original CSV with updated one
+            if not dry_run:
+                os.replace(temp_csv, csv_file)
+                logging.info(f"Updated CSV saved to {csv_file}")
+            else:
+                # In dry-run, remove temp file
+                if os.path.exists(temp_csv):
+                    os.remove(temp_csv)
     
-    # Replace original CSV with updated one
-    if not dry_run:
-        os.replace(temp_csv, csv_file)
-        logging.info(f"Updated CSV saved to {csv_file}")
-    else:
-        # In dry-run, remove temp file
+    except Exception as e:
+        logging.error(f"Error during processing: {e}")
+        # Clean up temp file on error
         if os.path.exists(temp_csv):
             os.remove(temp_csv)
+        raise
     
     logging.info(f"\n{'='*60}")
     logging.info(f"Sync completed!")
