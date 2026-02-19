@@ -434,6 +434,24 @@ def setup_logging(log_file: str = None) -> None:
     )
 
 
+def parse_int_from_string(value: str) -> Optional[int]:
+    """
+    Parse an integer from a string, handling floats by converting to int.
+    
+    Args:
+        value: String value to parse
+        
+    Returns:
+        Integer value or None if parsing fails
+    """
+    if not value:
+        return None
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return None
+
+
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
                       use_existing_file: bool = False) -> tuple:
@@ -540,18 +558,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 
                 # Check if we should skip this user based on overwrite flag
                 # Remove decimals from decimal1 for comparison (externalId is always whole number)
-                current_decimal1_int = None
-                if current_decimal1:
-                    try:
-                        current_decimal1_int = int(float(current_decimal1))
-                    except (ValueError, TypeError):
-                        current_decimal1_int = None
-                
-                external_id_int = None
-                try:
-                    external_id_int = int(external_id)
-                except (ValueError, TypeError):
-                    external_id_int = None
+                current_decimal1_int = parse_int_from_string(current_decimal1)
+                external_id_int = parse_int_from_string(external_id)
                 
                 # Skip if values don't match and overwrite is False
                 if not overwrite and current_decimal1_int is not None and current_decimal1_int != external_id_int:
@@ -664,11 +672,10 @@ def main():
     # Handle dry-run vs update flag precedence
     # If --update is specified, disable dry-run (unless --dry-run is also explicitly set)
     if args.update and not args.dry_run:
-        args.dry_run = False
-    elif not args.update:
-        # Default to dry-run mode if --update is not specified
+        args.dry_run = False  # Enable updates
+    else:
+        # Default to dry-run mode if --update is not specified, or if --dry-run is explicitly set
         args.dry_run = True
-    # If both --dry-run and --update are specified, --dry-run takes precedence
     
     # Generate default log file name at runtime if not specified
     if args.log_file is None:
@@ -686,7 +693,9 @@ def main():
         csv_file_path = args.file if args.file else args.csv_file
         use_existing_file = args.file is not None
         
-        # Load secrets and authenticate (needed for both download and update)
+        # Load secrets and authenticate
+        # Authentication is needed for both download and update operations
+        # (even with --file, updates require API calls)
         logging.info(f"Loading secrets from {args.secrets}...")
         secrets = load_secrets(args.secrets)
         
