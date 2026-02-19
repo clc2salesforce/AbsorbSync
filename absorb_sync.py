@@ -225,7 +225,7 @@ class AbsorbLMSClient:
             List of user dictionaries
         """
         users = []
-        offset = 0
+        page = 0  # Page number (0-indexed)
         total_items = None
         total_pages = None
         
@@ -233,7 +233,7 @@ class AbsorbLMSClient:
             url = f"{self.api_url}/users"
             params = {
                 "_limit": page_size,
-                "_offset": offset
+                "_offset": page  # Page number, not offset by page_size
             }
             
             try:
@@ -256,10 +256,10 @@ class AbsorbLMSClient:
                         break
                     
                     users.extend(page_users)
-                    current_batch = (offset // page_size) + 1
+                    current_batch = page + 1
                     logging.info(f"Downloading user batch {current_batch} of {total_pages} ({len(page_users)} users)")
                     
-                    offset += page_size
+                    page += 1  # Increment page number by 1
                     
                     # Check if we've retrieved all users
                     if len(users) >= total_items:
