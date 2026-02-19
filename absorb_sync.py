@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import sys
-sys.argv = ['absorb_sync.py', '--debug', '--dry-run']  # Add any flags you want
+import tempfile
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -478,7 +478,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     error_count = 0
     
     # Read CSV, process each user, and update CSV incrementally
-    import tempfile
+    temp_csv = None
     temp_dir = os.path.dirname(csv_file) or '.'
     with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, suffix='.tmp', newline='', encoding='utf-8') as temp_file:
         temp_csv = temp_file.name
@@ -539,7 +539,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     except Exception as e:
         logging.error(f"Error during processing: {e}")
         # Clean up temp file on error
-        if os.path.exists(temp_csv):
+        if temp_csv and os.path.exists(temp_csv):
             os.remove(temp_csv)
         raise
     
