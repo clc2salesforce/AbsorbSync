@@ -3,7 +3,7 @@
 Absorb LMS External ID Sync Script
 
 This script downloads the 'external ID' field from Absorb LMS user accounts
-and uploads it back to the same users' 'Ext_ID' field.
+and uploads it back to the same users' 'Associate Number' field. Note: the 'Associate Number' field is a custom field that is referenced based on the order it was created. In this case, it is the first custom field created, so it is accessed as 'customFields.decimal1' in the API.
 
 Features:
 - Exponential backoff retry logic
@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+sys.argv = ['absorb_sync.py', '--debug', '--dry-run']  # Add any flags you want
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
