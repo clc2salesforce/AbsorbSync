@@ -30,7 +30,7 @@ except ImportError:
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
     
-    def __init__(self, api_url: str, api_key: str, username: str, password: str):
+    def __init__(self, api_url: str, api_key: str, username: str, password: str, debug: bool = False):
         """
         Initialize the Absorb LMS client.
         
@@ -39,17 +39,29 @@ class AbsorbLMSClient:
             api_key: API key for x-api-key header and privateKey in authentication
             username: API username for authentication
             password: API password for authentication
+            debug: Enable debug logging (prints API key in cleartext)
         """
         self.api_url = api_url.rstrip('/')
         self.api_key = api_key
         self.username = username
         self.password = password
+        self.debug = debug
         self.session = requests.Session()
         # Set the API key header for all requests
         self.session.headers.update({
             "x-api-key": self.api_key
         })
         self.token = None
+        
+        if self.debug:
+            logging.info("="*60)
+            logging.info("DEBUG MODE ENABLED - Sensitive data will be logged")
+            logging.info("="*60)
+            logging.info(f"DEBUG: API URL: {self.api_url}")
+            logging.info(f"DEBUG: API Key: {self.api_key}")
+            logging.info(f"DEBUG: Username: {self.username}")
+            logging.info(f"DEBUG: Password: {self.password}")
+            logging.info("="*60)
         
     def authenticate(self) -> bool:
         """
@@ -130,9 +142,42 @@ class AbsorbLMSClient:
         delay = initial_delay
         last_error = None
         
+        # Debug logging for the request
+        if self.debug:
+            logging.info("="*60)
+            logging.info(f"DEBUG: HTTP Request Details")
+            logging.info(f"DEBUG: Method: {method}")
+            logging.info(f"DEBUG: URL: {url}")
+            
+            # Log headers (merge session headers with request-specific headers)
+            headers = dict(self.session.headers)
+            if 'headers' in kwargs:
+                headers.update(kwargs['headers'])
+            logging.info(f"DEBUG: Headers: {headers}")
+            
+            # Log request body if present
+            if 'json' in kwargs:
+                logging.info(f"DEBUG: JSON Body: {kwargs['json']}")
+            elif 'data' in kwargs:
+                logging.info(f"DEBUG: Data Body: {kwargs['data']}")
+            
+            # Log params if present
+            if 'params' in kwargs:
+                logging.info(f"DEBUG: Params: {kwargs['params']}")
+            logging.info("="*60)
+        
         for attempt in range(max_retries):
             try:
                 response = self.session.request(method, url, **kwargs)
+                
+                # Debug logging for the response
+                if self.debug:
+                    logging.info("="*60)
+                    logging.info(f"DEBUG: HTTP Response")
+                    logging.info(f"DEBUG: Status Code: {response.status_code}")
+                    logging.info(f"DEBUG: Response Headers: {dict(response.headers)}")
+                    logging.info(f"DEBUG: Response Body: {response.text[:500]}...")  # First 500 chars
+                    logging.info("="*60)
                 
                 # If we get a rate limit or server error, retry
                 if response.status_code in [429, 500, 502, 503, 504]:
@@ -154,6 +199,8 @@ class AbsorbLMSClient:
                 
             except requests.exceptions.RequestException as e:
                 last_error = str(e)
+                if self.debug:
+                    logging.info(f"DEBUG: Request Exception: {last_error}")
                 if attempt < max_retries - 1:
                     logging.warning(
                         f"Retry {attempt + 1}/{max_retries} for {method} {url} "
@@ -432,6 +479,11 @@ def main():
         action='store_true',
         help='Run in dry-run mode (no changes will be made)'
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode (prints sensitive data including API keys)'
+    )
     
     args = parser.parse_args()
     
@@ -457,7 +509,8 @@ def main():
             api_url=secrets['ABSORB_API_URL'],
             api_key=secrets['ABSORB_API_KEY'],
             username=secrets['ABSORB_API_USERNAME'],
-            password=secrets['ABSORB_API_PASSWORD']
+            password=secrets['ABSORB_API_PASSWORD'],
+            debug=args.debug
         )
         
         # Authenticate
