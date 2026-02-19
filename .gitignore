@@ -5,6 +5,9 @@ secrets.txt
 *.log
 logs/
 
+# CSV files with user data
+*.csv
+
 # Python
 __pycache__/
 *.py[cod]
