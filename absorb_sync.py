@@ -13,6 +13,8 @@ Features:
 """
 
 import argparse
+import csv
+import json
 import logging
 import os
 import sys
@@ -408,9 +410,6 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     Returns:
         Tuple of (success_count, error_count)
     """
-    import csv
-    import json
-    
     if csv_file is None:
         csv_file = f'users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
     
@@ -442,7 +441,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 continue
             
             # Get current decimal1 value
-            custom_fields = user.get('customFields', {}) or {}
+            custom_fields = user.get('customFields') or {}
             current_decimal1 = custom_fields.get('decimal1', '')
             
             # Store entire user data as JSON for PUT later
@@ -464,7 +463,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     
     if not dry_run:
         try:
-            confirmation = input(f"\nDo you want to proceed with updating {len(users_to_process)} users? (yes/no): ")
+            confirmation = input(f"\nDo you want to proceed with updating {len(users_to_process)} users? (yes/y/no): ")
             if confirmation.lower() not in ['yes', 'y']:
                 logging.info("Update cancelled by user")
                 return 0, 0
@@ -517,12 +516,11 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             updated_rows.append(row)
     
     # Write updated CSV
-    if not dry_run:
+    if not dry_run and updated_rows:
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-            if updated_rows:
-                writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
-                writer.writeheader()
-                writer.writerows(updated_rows)
+            writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(updated_rows)
         logging.info(f"Updated CSV saved to {csv_file}")
     
     logging.info(f"\n{'='*60}")
