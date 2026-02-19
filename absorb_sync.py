@@ -30,30 +30,26 @@ except ImportError:
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
     
-    def __init__(self, api_url: str, api_key: str, username: str = None, password: str = None, private_key: str = None):
+    def __init__(self, api_url: str, api_key: str, username: str, password: str):
         """
         Initialize the Absorb LMS client.
         
         Args:
             api_url: Base URL for the Absorb LMS API
-            api_key: API key for x-api-key header
-            username: API username (optional, for token authentication)
-            password: API password (optional, for token authentication)
-            private_key: Private key GUID (optional, for token authentication)
+            api_key: API key for x-api-key header and privateKey in authentication
+            username: API username for authentication
+            password: API password for authentication
         """
         self.api_url = api_url.rstrip('/')
         self.api_key = api_key
         self.username = username
         self.password = password
-        self.private_key = private_key
         self.session = requests.Session()
         # Set the API key header for all requests
         self.session.headers.update({
-            "x-api-key": self.api_key,
-            "x-api-version": "2"
+            "x-api-key": self.api_key
         })
         self.token = None
-        self.use_token_auth = bool(username and password and private_key)
         
     def authenticate(self) -> bool:
         """
@@ -61,20 +57,13 @@ class AbsorbLMSClient:
         
         Uses the /authenticate endpoint which requires:
         - x-api-key header (already set)
-        - x-api-version header set to "2" (already set)
-        - POST body with username, password, and privateKey
+        - POST body with username, password, and privateKey (same as api_key)
         
         Returns an authentication token that must be used in subsequent API calls.
         
         Returns:
             bool: True if authentication successful, False otherwise
         """
-        # If no credentials provided, try using API key only
-        if not self.use_token_auth:
-            logging.info("No authentication credentials provided")
-            logging.info("Attempting to use API key only (may not work for all endpoints)")
-            return True
-        
         # Authenticate using the /authenticate endpoint
         auth_url = f"{self.api_url}/authenticate"
         
@@ -82,11 +71,11 @@ class AbsorbLMSClient:
             "Content-Type": "application/json"
         }
         
-        # Request body as per REST API documentation
+        # Request body - privateKey is the same as the API key
         data = {
             "username": self.username,
             "password": self.password,
-            "privateKey": self.private_key
+            "privateKey": self.api_key
         }
         
         try:
@@ -102,9 +91,9 @@ class AbsorbLMSClient:
                 # The response is the authentication token as a string
                 self.token = response.text.strip('"')  # Remove quotes if present
                 if self.token:
-                    # Set the token for subsequent requests
+                    # Set the token for subsequent requests (no "Bearer " prefix)
                     self.session.headers.update({
-                        "Authorization": f"Bearer {self.token}"
+                        "Authorization": self.token
                     })
                     logging.info("Authentication successful")
                     return True
@@ -323,25 +312,14 @@ def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
     # Validate required secrets
     required_keys = [
         'ABSORB_API_URL',
-        'ABSORB_API_KEY'
-    ]
-    
-    # Optional keys for token authentication (if not provided, API key only is used)
-    optional_keys = [
+        'ABSORB_API_KEY',
         'ABSORB_API_USERNAME',
-        'ABSORB_API_PASSWORD',
-        'ABSORB_API_PRIVATE_KEY'
+        'ABSORB_API_PASSWORD'
     ]
     
     missing_keys = [key for key in required_keys if key not in secrets]
     if missing_keys:
         raise ValueError(f"Missing required secrets: {', '.join(missing_keys)}")
-    
-    # Log if authentication credentials are not fully provided
-    missing_optional = [key for key in optional_keys if key not in secrets or not secrets[key]]
-    if missing_optional:
-        logging.info(f"Optional authentication credentials not provided: {', '.join(missing_optional)}")
-        logging.info("Will use API key only (may not work for all endpoints)")
     
     return secrets
 
@@ -478,9 +456,8 @@ def main():
         client = AbsorbLMSClient(
             api_url=secrets['ABSORB_API_URL'],
             api_key=secrets['ABSORB_API_KEY'],
-            username=secrets.get('ABSORB_API_USERNAME'),
-            password=secrets.get('ABSORB_API_PASSWORD'),
-            private_key=secrets.get('ABSORB_API_PRIVATE_KEY')
+            username=secrets['ABSORB_API_USERNAME'],
+            password=secrets['ABSORB_API_PASSWORD']
         )
         
         # Authenticate
