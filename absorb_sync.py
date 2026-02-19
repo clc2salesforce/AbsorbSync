@@ -214,66 +214,96 @@ class AbsorbLMSClient:
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
-    def get_users(self, page_size: int = 500) -> List[Dict[str, Any]]:
+    def get_users_incremental(self, page_size: int = 500, csv_file: str = None) -> int:
         """
-        Retrieve all users from Absorb LMS with pagination.
+        Retrieve all users from Absorb LMS with pagination and save to CSV incrementally.
         
         Args:
             page_size: Number of users to retrieve per page (default: 500)
+            csv_file: Path to CSV file to save users incrementally
             
         Returns:
-            List of user dictionaries
+            Total number of users with externalId retrieved
         """
-        users = []
         page = 0  # Page number (0-indexed)
         total_items = None
         total_pages = None
+        users_with_external_id = 0
         
-        while True:
-            url = f"{self.api_url}/users"
-            params = {
-                "_limit": page_size,
-                "_offset": page  # Page number, not offset by page_size
-            }
+        # Open CSV file and write header
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Status', 'id', 'username', 'externalId', 'current_decimal1', 'user_data_json'])
             
-            try:
-                response = self._retry_request('GET', url, params=params)
+            while True:
+                url = f"{self.api_url}/users"
+                params = {
+                    "_limit": page_size,
+                    "_offset": page  # Page number, not offset by page_size
+                }
                 
-                if response.status_code == 200:
-                    data = response.json()
+                try:
+                    response = self._retry_request('GET', url, params=params)
                     
-                    # Get total items from first response to calculate pages
-                    if total_items is None:
-                        total_items = data.get('totalItems', 0)
-                        total_pages = (total_items + page_size - 1) // page_size  # Ceiling division
-                        logging.info(f"Total users to retrieve: {total_items}")
-                        logging.info(f"Will download in {total_pages} batches of {page_size}")
-                    
-                    # The API returns 'users' (lowercase)
-                    page_users = data.get('users', [])
-                    
-                    if not page_users:
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Get total items from first response to calculate pages
+                        if total_items is None:
+                            total_items = data.get('totalItems', 0)
+                            total_pages = (total_items + page_size - 1) // page_size  # Ceiling division
+                            logging.info(f"Total users to retrieve: {total_items}")
+                            logging.info(f"Will download in {total_pages} batches of {page_size}")
+                        
+                        # The API returns 'users' (lowercase)
+                        page_users = data.get('users', [])
+                        
+                        if not page_users:
+                            break
+                        
+                        # Write users to CSV immediately after retrieving each batch
+                        batch_count = 0
+                        for user in page_users:
+                            user_id = user.get('id', '')
+                            username = user.get('username', 'Unknown')
+                            external_id = user.get('externalId', '')
+                            
+                            # Skip users without externalId
+                            if not external_id:
+                                continue
+                            
+                            # Get current decimal1 value
+                            custom_fields = user.get('customFields') or {}
+                            current_decimal1 = custom_fields.get('decimal1', '')
+                            
+                            # Store entire user data as JSON for PUT later
+                            user_data_json = json.dumps(user)
+                            
+                            writer.writerow(['Retrieved', user_id, username, external_id, current_decimal1, user_data_json])
+                            batch_count += 1
+                            users_with_external_id += 1
+                        
+                        # Flush to ensure data is written to disk after each batch
+                        f.flush()
+                        
+                        current_batch = page + 1
+                        logging.info(f"Downloading user batch {current_batch} of {total_pages} ({len(page_users)} users, {batch_count} with externalId)")
+                        
+                        page += 1  # Increment page number by 1
+                        
+                        # Check if we've retrieved all users based on returned count
+                        if len(page_users) < page_size:
+                            break
+                    else:
+                        logging.error(f"Failed to retrieve users: {response.status_code} - {response.text}")
                         break
-                    
-                    users.extend(page_users)
-                    current_batch = page + 1
-                    logging.info(f"Downloading user batch {current_batch} of {total_pages} ({len(page_users)} users)")
-                    
-                    page += 1  # Increment page number by 1
-                    
-                    # Check if we've retrieved all users
-                    if len(users) >= total_items:
-                        break
-                else:
-                    logging.error(f"Failed to retrieve users: {response.status_code} - {response.text}")
+                        
+                except Exception as e:
+                    logging.error(f"Error retrieving users: {str(e)}")
                     break
-                    
-            except Exception as e:
-                logging.error(f"Error retrieving users: {str(e)}")
-                break
         
-        logging.info(f"Total users retrieved: {len(users)}")
-        return users
+        logging.info(f"Total users with externalId saved to CSV: {users_with_external_id}")
+        return users_with_external_id
     
     def update_user(self, user_data: Dict[str, Any], external_id: str) -> bool:
         """
@@ -419,52 +449,22 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     if dry_run:
         logging.info("DRY RUN MODE - No changes will be made")
     
-    # Get all users
+    # Get all users and save incrementally to CSV
     logging.info("Fetching users from Absorb LMS...")
-    users = client.get_users()
-    logging.info(f"Total users retrieved: {len(users)}")
+    users_count = client.get_users_incremental(page_size=500, csv_file=csv_file)
     
-    # Save users to CSV
-    logging.info(f"Saving users to {csv_file}...")
-    users_to_process = []
-    
-    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Status', 'id', 'username', 'externalId', 'current_decimal1', 'user_data_json'])
-        
-        for user in users:
-            user_id = user.get('id', '')
-            username = user.get('username', 'Unknown')
-            external_id = user.get('externalId', '')
-            
-            # Skip users without externalId
-            if not external_id:
-                continue
-            
-            # Get current decimal1 value
-            custom_fields = user.get('customFields') or {}
-            current_decimal1 = custom_fields.get('decimal1', '')
-            
-            # Store entire user data as JSON for PUT later
-            user_data_json = json.dumps(user)
-            
-            writer.writerow(['Retrieved', user_id, username, external_id, current_decimal1, user_data_json])
-            users_to_process.append(user)
-    
-    logging.info(f"Saved {len(users_to_process)} users with externalId to {csv_file}")
-    
-    if len(users_to_process) == 0:
+    if users_count == 0:
         logging.warning("No users with externalId found. Exiting.")
         return 0, 0
     
     # Ask for confirmation
     logging.info("\n" + "="*60)
-    logging.info(f"Ready to process {len(users_to_process)} users")
+    logging.info(f"Ready to process {users_count} users")
     logging.info("="*60)
     
     if not dry_run:
         try:
-            confirmation = input(f"\nDo you want to proceed with updating {len(users_to_process)} users? (yes/y/no): ")
+            confirmation = input(f"\nDo you want to proceed with updating {users_count} users? (yes/y/no): ")
             if confirmation.lower() not in ['yes', 'y']:
                 logging.info("Update cancelled by user")
                 return 0, 0
@@ -472,16 +472,20 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             logging.info("\nUpdate cancelled by user")
             return 0, 0
     
-    # Process the CSV file
+    # Process the CSV file and update incrementally
     logging.info("\nProcessing users...")
     success_count = 0
     error_count = 0
-    skip_count = 0
     
-    # Read CSV and update
-    updated_rows = []
-    with open(csv_file, 'r', newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
+    # Read CSV, process each user, and update CSV incrementally
+    temp_csv = csv_file + '.tmp'
+    with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
+         open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
+        
+        reader = csv.DictReader(f_in)
+        fieldnames = reader.fieldnames
+        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+        writer.writeheader()
         
         for row in reader:
             user_id = row['id']
@@ -495,7 +499,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 logging.error(f"Failed to parse user data for {username}: {e}")
                 row['Status'] = 'Failure'
                 error_count += 1
-                updated_rows.append(row)
+                writer.writerow(row)
+                f_out.flush()  # Flush after each row
                 continue
             
             logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
@@ -514,19 +519,21 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     row['Status'] = 'Failure'
                     error_count += 1
             
-            updated_rows.append(row)
+            writer.writerow(row)
+            f_out.flush()  # Flush after each row to ensure it's written to disk
     
-    # Write updated CSV
-    if not dry_run and updated_rows:
-        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
-            writer.writeheader()
-            writer.writerows(updated_rows)
+    # Replace original CSV with updated one
+    if not dry_run:
+        os.replace(temp_csv, csv_file)
         logging.info(f"Updated CSV saved to {csv_file}")
+    else:
+        # In dry-run, remove temp file
+        if os.path.exists(temp_csv):
+            os.remove(temp_csv)
     
     logging.info(f"\n{'='*60}")
     logging.info(f"Sync completed!")
-    logging.info(f"Total users processed: {len(updated_rows)}")
+    logging.info(f"Total users processed: {success_count + error_count}")
     logging.info(f"Successful updates: {success_count}")
     logging.info(f"Errors: {error_count}")
     logging.info(f"{'='*60}\n")
