@@ -214,13 +214,14 @@ class AbsorbLMSClient:
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
-    def get_users_incremental(self, page_size: int = 500, csv_file: str = None) -> int:
+    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False) -> int:
         """
         Retrieve all users from Absorb LMS with pagination and save to CSV incrementally.
         
         Args:
             page_size: Number of users to retrieve per page (default: 500)
             csv_file: Path to CSV file to save users incrementally
+            filter_blank: If True, only retrieve users where customFields/decimal1 is null
             
         Returns:
             Total number of users with externalId retrieved
@@ -241,6 +242,10 @@ class AbsorbLMSClient:
                     "_limit": page_size,
                     "_offset": page  # Page number, not offset by page_size
                 }
+                
+                # Add filter for blank decimal1 if requested
+                if filter_blank:
+                    params["_filter"] = "customFields/decimal1 eq null"
                 
                 try:
                     response = self._retry_request('GET', url, params=params)
@@ -429,7 +434,9 @@ def setup_logging(log_file: str = None) -> None:
     )
 
 
-def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None) -> tuple:
+def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
+                      filter_blank: bool = False, overwrite: bool = False, 
+                      use_existing_file: bool = False, skip_count: int = 0) -> tuple:
     """
     Sync external IDs from 'externalId' field to 'customFields.decimal1' field.
     
@@ -437,9 +444,13 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         client: Authenticated AbsorbLMSClient instance
         dry_run: If True, only simulate the sync without making changes
         csv_file: Path to CSV file for storing user data
+        filter_blank: If True, only process users with null decimal1
+        overwrite: If True, update even if decimal1 already has a value
+        use_existing_file: If True, skip download and use existing CSV file
+        skip_count: Counter for skipped users
         
     Returns:
-        Tuple of (success_count, error_count)
+        Tuple of (success_count, error_count, skip_count)
     """
     if csv_file is None:
         csv_file = f'users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
@@ -449,13 +460,31 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     if dry_run:
         logging.info("DRY RUN MODE - No changes will be made")
     
-    # Get all users and save incrementally to CSV
-    logging.info("Fetching users from Absorb LMS...")
-    users_count = client.get_users_incremental(page_size=500, csv_file=csv_file)
+    if filter_blank:
+        logging.info("Filtering for users with null/empty decimal1 field only")
+    
+    if not overwrite:
+        logging.info("Will skip users where externalId doesn't match existing decimal1 value (marked as 'Different')")
+    
+    # Get all users and save incrementally to CSV, or use existing file
+    if use_existing_file:
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"CSV file not found: {csv_file}")
+        logging.info(f"Using existing CSV file: {csv_file}")
+        
+        # Count users in CSV
+        with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            users_count = sum(1 for _ in reader)
+        
+        logging.info(f"Found {users_count} users in CSV file")
+    else:
+        logging.info("Fetching users from Absorb LMS...")
+        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank)
     
     if users_count == 0:
         logging.warning("No users with externalId found. Exiting.")
-        return 0, 0
+        return 0, 0, 0
     
     # Ask for confirmation
     logging.info("\n" + "="*60)
@@ -467,10 +496,10 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             confirmation = input(f"\nDo you want to proceed with updating {users_count} users? (yes/y/no): ")
             if confirmation.lower() not in ['yes', 'y']:
                 logging.info("Update cancelled by user")
-                return 0, 0
+                return 0, 0, 0
         except (EOFError, KeyboardInterrupt):
             logging.info("\nUpdate cancelled by user")
-            return 0, 0
+            return 0, 0, 0
     
     # Process the CSV file and update incrementally
     logging.info("\nProcessing users...")
@@ -496,6 +525,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 user_id = row['id']
                 username = row['username']
                 external_id = row['externalId']
+                current_decimal1 = row.get('current_decimal1', '')
                 user_data_json = row['user_data_json']
                 
                 try:
@@ -506,6 +536,30 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     error_count += 1
                     writer.writerow(row)
                     f_out.flush()  # Flush after each row
+                    continue
+                
+                # Check if we should skip this user based on overwrite flag
+                # Remove decimals from decimal1 for comparison (externalId is always whole number)
+                current_decimal1_int = None
+                if current_decimal1:
+                    try:
+                        current_decimal1_int = int(float(current_decimal1))
+                    except (ValueError, TypeError):
+                        current_decimal1_int = None
+                
+                external_id_int = None
+                try:
+                    external_id_int = int(external_id)
+                except (ValueError, TypeError):
+                    external_id_int = None
+                
+                # Skip if values don't match and overwrite is False
+                if not overwrite and current_decimal1_int is not None and current_decimal1_int != external_id_int:
+                    logging.info(f"Skipping user {username} (ID: {user_id}) - External ID: {external_id}, Current decimal1: {current_decimal1} (different values)")
+                    row['Status'] = 'Different'
+                    skip_count += 1
+                    writer.writerow(row)
+                    f_out.flush()
                     continue
                 
                 logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
@@ -545,12 +599,13 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     
     logging.info(f"\n{'='*60}")
     logging.info(f"Sync completed!")
-    logging.info(f"Total users processed: {success_count + error_count}")
+    logging.info(f"Total users processed: {success_count + error_count + skip_count}")
     logging.info(f"Successful updates: {success_count}")
+    logging.info(f"Skipped (different values): {skip_count}")
     logging.info(f"Errors: {error_count}")
     logging.info(f"{'='*60}\n")
     
-    return success_count, error_count
+    return success_count, error_count, skip_count
 
 
 def main():
@@ -583,8 +638,32 @@ def main():
         default=None,
         help='Path to CSV file for storing user data (default: users_YYYYMMDD_HHMMSS.csv)'
     )
+    parser.add_argument(
+        '--blank',
+        action='store_true',
+        help='Filter only users that have a null/empty value for decimal1 field'
+    )
+    parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Update customFields.decimal1 even if it already has a value'
+    )
+    parser.add_argument(
+        '--update',
+        action='store_true',
+        help='Actually perform updates (default is dry-run mode)'
+    )
+    parser.add_argument(
+        '--file',
+        default=None,
+        help='Path to existing CSV file to process (skips download phase)'
+    )
     
     args = parser.parse_args()
+    
+    # Default to dry-run mode unless --update is specified
+    if not args.update:
+        args.dry_run = True
     
     # Generate default log file name at runtime if not specified
     if args.log_file is None:
@@ -598,31 +677,60 @@ def main():
     logging.info("="*60)
     
     try:
-        # Load secrets
-        logging.info(f"Loading secrets from {args.secrets}...")
-        secrets = load_secrets(args.secrets)
+        # Determine CSV file path
+        csv_file_path = args.file if args.file else args.csv_file
+        use_existing_file = args.file is not None
         
-        # Initialize client
-        logging.info("Initializing Absorb LMS client...")
-        client = AbsorbLMSClient(
-            api_url=secrets['ABSORB_API_URL'],
-            api_key=secrets['ABSORB_API_KEY'],
-            username=secrets['ABSORB_API_USERNAME'],
-            password=secrets['ABSORB_API_PASSWORD'],
-            debug=args.debug
-        )
-        
-        # Authenticate
-        logging.info("Authenticating with Absorb LMS...")
-        if not client.authenticate():
-            logging.error("Authentication failed. Exiting.")
-            sys.exit(1)
+        # If using existing file, skip authentication
+        if use_existing_file:
+            logging.info(f"Using existing CSV file: {csv_file_path}")
+            # Create a minimal client for update operations only
+            logging.info(f"Loading secrets from {args.secrets}...")
+            secrets = load_secrets(args.secrets)
+            
+            logging.info("Initializing Absorb LMS client...")
+            client = AbsorbLMSClient(
+                api_url=secrets['ABSORB_API_URL'],
+                api_key=secrets['ABSORB_API_KEY'],
+                username=secrets['ABSORB_API_USERNAME'],
+                password=secrets['ABSORB_API_PASSWORD'],
+                debug=args.debug
+            )
+            
+            # Authenticate
+            logging.info("Authenticating with Absorb LMS...")
+            if not client.authenticate():
+                logging.error("Authentication failed. Exiting.")
+                sys.exit(1)
+        else:
+            # Load secrets
+            logging.info(f"Loading secrets from {args.secrets}...")
+            secrets = load_secrets(args.secrets)
+            
+            # Initialize client
+            logging.info("Initializing Absorb LMS client...")
+            client = AbsorbLMSClient(
+                api_url=secrets['ABSORB_API_URL'],
+                api_key=secrets['ABSORB_API_KEY'],
+                username=secrets['ABSORB_API_USERNAME'],
+                password=secrets['ABSORB_API_PASSWORD'],
+                debug=args.debug
+            )
+            
+            # Authenticate
+            logging.info("Authenticating with Absorb LMS...")
+            if not client.authenticate():
+                logging.error("Authentication failed. Exiting.")
+                sys.exit(1)
         
         # Sync external IDs
-        success_count, error_count = sync_external_ids(
+        success_count, error_count, skip_count = sync_external_ids(
             client, 
             dry_run=args.dry_run,
-            csv_file=args.csv_file
+            csv_file=csv_file_path,
+            filter_blank=args.blank,
+            overwrite=args.overwrite,
+            use_existing_file=use_existing_file
         )
         
         # Exit with appropriate code
