@@ -214,7 +214,7 @@ class AbsorbLMSClient:
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
-    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False) -> int:
+    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False, department_id: str = None) -> int:
         """
         Retrieve all users from Absorb LMS with pagination and save to CSV incrementally.
         
@@ -222,6 +222,7 @@ class AbsorbLMSClient:
             page_size: Number of users to retrieve per page (default: 500)
             csv_file: Path to CSV file to save users incrementally
             filter_blank: If True, only retrieve users where customFields/decimal1 is null
+            department_id: If provided, filter by departmentId
             
         Returns:
             Total number of users with externalId retrieved
@@ -243,9 +244,16 @@ class AbsorbLMSClient:
                     "_offset": page  # Page number, not offset by page_size
                 }
                 
-                # Add filter for blank decimal1 if requested
+                # Build OData filter
+                filters = []
                 if filter_blank:
-                    params["_filter"] = "customFields/decimal1 eq null"
+                    filters.append("customFields/decimal1 eq null")
+                if department_id:
+                    filters.append(f"departmentId eq '{department_id}'")
+                
+                # Combine filters with 'and' if multiple
+                if filters:
+                    params["_filter"] = " and ".join(filters)
                 
                 try:
                     response = self._retry_request('GET', url, params=params)
@@ -452,9 +460,25 @@ def parse_int_from_string(value: str) -> Optional[int]:
         return None
 
 
+def is_numeric_only(value: str) -> bool:
+    """
+    Check if a string contains only numeric characters (digits).
+    
+    Args:
+        value: String to check
+        
+    Returns:
+        True if string contains only digits, False otherwise
+    """
+    if not value:
+        return False
+    return value.isdigit()
+
+
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
-                      use_existing_file: bool = False) -> tuple:
+                      use_existing_file: bool = False, allow_alpha: bool = False,
+                      department_id: str = None) -> tuple:
     """
     Sync external IDs from 'externalId' field to 'customFields.decimal1' field.
     
@@ -465,6 +489,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         filter_blank: If True, only process users with null decimal1
         overwrite: If True, update even if decimal1 already has a value
         use_existing_file: If True, skip download and use existing CSV file
+        allow_alpha: If True, allow alphanumeric externalIds; otherwise only numeric
+        department_id: If provided, filter by departmentId
         
     Returns:
         Tuple of (success_count, error_count, skip_count)
@@ -479,6 +505,12 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     
     if filter_blank:
         logging.info("Filtering for users with null/empty decimal1 field only")
+    
+    if department_id:
+        logging.info(f"Filtering for users in department: {department_id}")
+    
+    if not allow_alpha:
+        logging.info("Validating externalIds are numeric only (use --alpha to allow alphanumeric)")
     
     if not overwrite:
         logging.info("Will skip users where externalId doesn't match existing decimal1 value (marked as 'Different')")
@@ -497,7 +529,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         logging.info(f"Found {users_count} users in CSV file")
     else:
         logging.info("Fetching users from Absorb LMS...")
-        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank)
+        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank, department_id=department_id)
     
     if users_count == 0:
         logging.warning("No users with externalId found. Exiting.")
@@ -523,6 +555,16 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     success_count = 0
     error_count = 0
     skip_count = 0  # Initialize as local variable
+    
+    # Helper function to skip a user and write to CSV
+    def skip_user(row, status, message, writer, f_out):
+        """Skip a user, update status, log, and write to CSV."""
+        nonlocal skip_count
+        logging.info(message)
+        row['Status'] = status
+        skip_count += 1
+        writer.writerow(row)
+        f_out.flush()
     
     # Read CSV, process each user, and update CSV incrementally
     temp_csv = None
@@ -556,6 +598,21 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     f_out.flush()  # Flush after each row
                     continue
                 
+                # Check if externalId is blank but decimal1 is set
+                if not external_id and current_decimal1:
+                    skip_user(row, 'Different', 
+                             f"Skipping user {username} (ID: {user_id}) - External ID is blank but decimal1 is set: {current_decimal1}",
+                             writer, f_out)
+                    continue
+                
+                # Validate externalId format if not allowing alphanumeric
+                # After the first check, external_id must be truthy if we reach here
+                if not allow_alpha and not is_numeric_only(external_id):
+                    skip_user(row, 'Wrong Format',
+                             f"Skipping user {username} (ID: {user_id}) - External ID '{external_id}' is not numeric (use --alpha to allow alphanumeric)",
+                             writer, f_out)
+                    continue
+                
                 # Check if we should skip this user based on overwrite flag
                 # Remove decimals from decimal1 for comparison (externalId is always whole number)
                 current_decimal1_int = parse_int_from_string(current_decimal1)
@@ -563,11 +620,9 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 
                 # Skip if values don't match and overwrite is False
                 if not overwrite and current_decimal1_int is not None and current_decimal1_int != external_id_int:
-                    logging.info(f"Skipping user {username} (ID: {user_id}) - External ID: {external_id}, Current decimal1: {current_decimal1} (different values)")
-                    row['Status'] = 'Different'
-                    skip_count += 1
-                    writer.writerow(row)
-                    f_out.flush()
+                    skip_user(row, 'Different',
+                             f"Skipping user {username} (ID: {user_id}) - External ID: {external_id}, Current decimal1: {current_decimal1} (different values)",
+                             writer, f_out)
                     continue
                 
                 logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
@@ -666,6 +721,16 @@ def main():
         default=None,
         help='Path to existing CSV file to process (skips download phase)'
     )
+    parser.add_argument(
+        '--department',
+        default=None,
+        help='Filter by departmentId (e.g., c458459d-2f86-4c66-a481-e17e6983f7ee)'
+    )
+    parser.add_argument(
+        '--alpha',
+        action='store_true',
+        help='Allow alphanumeric externalIds (default: numeric only)'
+    )
     
     args = parser.parse_args()
     
@@ -725,7 +790,9 @@ def main():
             csv_file=csv_file_path,
             filter_blank=args.blank,
             overwrite=args.overwrite,
-            use_existing_file=use_existing_file
+            use_existing_file=use_existing_file,
+            allow_alpha=args.alpha,
+            department_id=args.department
         )
         
         # Exit with appropriate code
