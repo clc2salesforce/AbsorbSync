@@ -195,13 +195,13 @@ Uses OData filter syntax to download only users where `customFields.decimal1` is
 ### --department Flag
 Filters users by department ID UUID.
 
-**OData Filter:** `_filter=departmentId eq '<department-id>'`
+**OData Filter:** `_filter=departmentId eq guid'<department-id>'`
 
 **Example:** `--department c458459d-2f86-4c66-a481-e17e6983f7ee`
 
 **Combining Filters:** The script combines multiple filters using the `and` operator:
 ```
-_filter=(customFields/decimal1 eq null) and (departmentId eq '<department-id>')
+_filter=(customFields/decimal1 eq null) and (departmentId eq guid'<department-id>')
 ```
 
 ## Validation and Behavior
