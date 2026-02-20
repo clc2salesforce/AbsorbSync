@@ -249,7 +249,7 @@ class AbsorbLMSClient:
                 if filter_blank:
                     filters.append("customFields/decimal1 eq null")
                 if department_id:
-                    filters.append(f"departmentId eq {department_id}")
+                    filters.append(f"departmentId eq guid'{department_id}'")
                 
                 # Combine filters with 'and' if multiple
                 if filters:
