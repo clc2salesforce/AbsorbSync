@@ -455,12 +455,3 @@ This will show:
 - All HTTP responses (status, headers, body)
 
 **Note:** Debug mode prints API keys in cleartext - use only in sandbox.
-
-## License
-
-This project is provided as-is for syncing Absorb LMS external IDs.
-
-## Support
-
-For issues, questions, or contributions, please visit:
-https://github.com/clc2salesforce/AbsorbSync
