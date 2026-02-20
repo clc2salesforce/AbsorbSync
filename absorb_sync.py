@@ -343,8 +343,11 @@ class AbsorbLMSClient:
                 user_data['customFields'] = {}
             
             # Determine the appropriate value type based on the custom field name
-            # decimal fields (decimal1, decimal2, etc.) need to be floats
-            # string fields (string1, string2, etc.) can remain as strings
+            # Note: This assumes standard Absorb LMS custom field naming conventions:
+            # - decimal fields (decimal1, decimal2, etc.) need to be floats
+            # - string fields (string1, string2, etc.) can remain as strings
+            # - other field types will be treated as strings
+            # Users should verify the field exists and has the correct type in their Absorb LMS instance
             if custom_field.startswith('decimal'):
                 try:
                     field_value = float(external_id)
@@ -804,7 +807,9 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
         '--customField',
         default='decimal1',
         metavar='FIELD',
-        help='Custom field to sync to (e.g., decimal1, string1, string2). Only specify the field name under customFields (default: decimal1)'
+        help='Custom field to sync to (e.g., decimal1, decimal2, string1, string2). '
+             'Only specify the field name under customFields. Decimal fields will be converted to float, '
+             'string fields will remain as strings. Verify the field exists in your Absorb LMS instance. (default: decimal1)'
     )
     
     # Debug options
@@ -835,6 +840,12 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     logging.info("="*60)
     logging.info("Absorb LMS External ID Sync")
     logging.info("="*60)
+    
+    # Validate custom field name and provide a warning if it doesn't match expected patterns
+    import re
+    if not re.match(r'^(decimal|string|date|checkbox)\d+$', args.customField):
+        logging.warning(f"Custom field name '{args.customField}' does not match the standard Absorb LMS naming pattern (e.g., decimal1, string1, date1).")
+        logging.warning("Please verify this field exists in your Absorb LMS instance before proceeding.")
     
     try:
         # Determine CSV file path
