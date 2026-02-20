@@ -605,8 +605,11 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                              writer, f_out)
                     continue
                 
+                # Skip users with blank externalId (and blank decimal1, since we already handled blank external + set decimal1)
+                if not external_id:
+                    continue
+                
                 # Validate externalId format if not allowing alphanumeric
-                # After the first check, external_id must be truthy if we reach here
                 if not allow_alpha and not is_numeric_only(external_id):
                     skip_user(row, 'Wrong Format',
                              f"Skipping user {username} (ID: {user_id}) - External ID '{external_id}' is not numeric (use --alpha to allow alphanumeric)",
