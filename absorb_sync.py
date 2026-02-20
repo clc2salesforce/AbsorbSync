@@ -2,16 +2,17 @@
 """
 Absorb LMS External ID Sync Script
 
-This script downloads the 'external ID' field from Absorb LMS user accounts
+This script downloads values from a source field (default: 'externalId') from Absorb LMS user accounts
 and uploads it back to a specified custom field. By default, it targets the 'Associate Number' field (customFields.decimal1), 
 but can be configured to sync to any custom field using the --customField flag (e.g., decimal1, string1, string2, etc.).
+The source field can also be customized using the --sourceField flag.
 
 Features:
 - Exponential backoff retry logic
 - Text file logging
 - Dry run mode
 - Secrets loaded from external file
-- Configurable target custom field
+- Configurable source and target custom fields
 """
 
 import argparse
@@ -216,29 +217,33 @@ class AbsorbLMSClient:
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
-    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False, department_id: str = None, custom_field: str = 'decimal1') -> int:
+    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False, department_id: str = None, destination_field: str = 'customFields.decimal1', source_field: str = 'externalId') -> int:
         """
         Retrieve all users from Absorb LMS with pagination and save to CSV incrementally.
         
         Args:
             page_size: Number of users to retrieve per page (default: 500)
             csv_file: Path to CSV file to save users incrementally
-            filter_blank: If True, only retrieve users where the custom field is null
+            filter_blank: If True, only retrieve users where the destination field is null
             department_id: If provided, filter by departmentId
-            custom_field: Name of the custom field to sync (default: decimal1)
+            destination_field: Full path to destination field to sync (default: customFields.decimal1)
+            source_field: Name of the source field to sync from (default: externalId)
             
         Returns:
-            Total number of users with externalId retrieved
+            Total number of users with the source field retrieved
         """
         page = 0  # Page number (0-indexed)
         total_items = None
         total_pages = None
-        users_with_external_id = 0
+        users_with_source_field = 0
+        
+        # Extract column name for CSV
+        dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
         
         # Open CSV file and write header
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Status', 'id', 'username', 'externalId', f'current_{custom_field}', 'user_data_json'])
+            writer.writerow(['Status', 'id', 'username', source_field, dest_col_name, 'user_data_json'])
             
             while True:
                 url = f"{self.api_url}/users"
@@ -250,7 +255,12 @@ class AbsorbLMSClient:
                 # Build OData filter
                 filters = []
                 if filter_blank:
-                    filters.append(f"customFields/{custom_field} eq null")
+                    # For customFields, use the format customFields/{fieldname}
+                    if destination_field.startswith('customFields.'):
+                        field_name = destination_field.split('.', 1)[1]
+                        filters.append(f"customFields/{field_name} eq null")
+                    else:
+                        filters.append(f"{destination_field} eq null")
                 if department_id:
                     filters.append(f"departmentId eq guid'{department_id}'")
                 
@@ -282,28 +292,27 @@ class AbsorbLMSClient:
                         for user in page_users:
                             user_id = user.get('id', '')
                             username = user.get('username', 'Unknown')
-                            external_id = user.get('externalId', '')
+                            source_value = get_nested_field_value(user, source_field)
                             
-                            # Skip users without externalId
-                            if not external_id:
+                            # Skip users without source field value
+                            if not source_value:
                                 continue
                             
-                            # Get current custom field value
-                            custom_fields = user.get('customFields') or {}
-                            current_custom_field_value = custom_fields.get(custom_field, '')
+                            # Get current destination field value
+                            current_dest_value = get_nested_field_value(user, destination_field)
                             
                             # Store entire user data as JSON for PUT later
                             user_data_json = json.dumps(user)
                             
-                            writer.writerow(['Retrieved', user_id, username, external_id, current_custom_field_value, user_data_json])
+                            writer.writerow(['Retrieved', user_id, username, source_value, current_dest_value, user_data_json])
                             batch_count += 1
-                            users_with_external_id += 1
+                            users_with_source_field += 1
                         
                         # Flush to ensure data is written to disk after each batch
                         f.flush()
                         
                         current_batch = page + 1
-                        logging.info(f"Downloading user batch {current_batch} of {total_pages} ({len(page_users)} users, {batch_count} with externalId)")
+                        logging.info(f"Downloading user batch {current_batch} of {total_pages} ({len(page_users)} users, {batch_count} with {source_field})")
                         
                         page += 1  # Increment page number by 1
                         
@@ -319,17 +328,17 @@ class AbsorbLMSClient:
                     logging.error(f"Error retrieving users: {str(e)}")
                     raise
         
-        logging.info(f"Total users with externalId saved to CSV: {users_with_external_id}")
-        return users_with_external_id
+        logging.info(f"Total users with {source_field} saved to CSV: {users_with_source_field}")
+        return users_with_source_field
     
-    def update_user(self, user_data: Dict[str, Any], external_id: str, custom_field: str = 'decimal1') -> bool:
+    def update_user(self, user_data: Dict[str, Any], source_value: str, destination_field: str) -> bool:
         """
-        Update a user's custom field with the externalId value.
+        Update a user's destination field with the source field value.
         
         Args:
             user_data: Complete user data dictionary
-            external_id: External ID value to set in the custom field
-            custom_field: Name of the custom field to update (default: decimal1)
+            source_value: Source field value to set in the destination field
+            destination_field: Full path to the destination field (e.g., 'customFields.decimal1', 'externalId')
             
         Returns:
             bool: True if update successful, False otherwise
@@ -338,27 +347,21 @@ class AbsorbLMSClient:
         url = f"{self.api_url}/users/{user_id}"
         
         try:
-            # Update the specified custom field with the externalId
-            if 'customFields' not in user_data or user_data['customFields'] is None:
-                user_data['customFields'] = {}
-            
-            # Determine the appropriate value type based on the custom field name
-            # Note: This assumes standard Absorb LMS custom field naming conventions:
-            # - decimal fields (decimal1, decimal2, etc.) need to be floats
-            # - string fields (string1, string2, etc.) can remain as strings
-            # - other field types will be treated as strings
-            # Users should verify the field exists and has the correct type in their Absorb LMS instance
-            if custom_field.startswith('decimal'):
+            # Determine the appropriate value type based on the destination field name
+            # If it's a decimal field, convert to float
+            field_name = destination_field.split('.')[-1] if '.' in destination_field else destination_field
+            if field_name.startswith('decimal'):
                 try:
-                    field_value = float(external_id)
+                    field_value = float(source_value)
                 except (ValueError, TypeError):
-                    logging.warning(f"Cannot convert externalId '{external_id}' to decimal for user {user_id}")
+                    logging.warning(f"Cannot convert source value '{source_value}' to decimal for user {user_id}")
                     return False
             else:
                 # For string fields and others, use the value as-is
-                field_value = external_id
+                field_value = source_value
             
-            user_data['customFields'][custom_field] = field_value
+            # Set the destination field value using the helper function
+            set_nested_field_value(user_data, destination_field, field_value)
             
             # PUT the entire user profile back
             headers = {
@@ -382,6 +385,75 @@ class AbsorbLMSClient:
         except Exception as e:
             logging.error(f"Error updating user {user_id}: {str(e)}")
             return False
+
+
+def get_nested_field_value(data: Dict[str, Any], field_path: str) -> str:
+    """
+    Extract a field value from a nested dictionary using dot notation.
+    
+    Args:
+        data: Dictionary containing user data
+        field_path: Field path using dot notation (e.g., 'externalId', 'customFields.string1')
+        
+    Returns:
+        Field value as string, or empty string if not found
+    """
+    if '.' in field_path:
+        # Handle nested fields
+        parts = field_path.split('.')
+        value = data
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+                if value is None:
+                    return ''
+            else:
+                return ''
+        return str(value) if value is not None else ''
+    else:
+        # Simple field
+        value = data.get(field_path, '')
+        return str(value) if value else ''
+
+
+def set_nested_field_value(data: Dict[str, Any], field_path: str, value: Any) -> None:
+    """
+    Set a field value in a nested dictionary using dot notation.
+    
+    Args:
+        data: Dictionary containing user data
+        field_path: Field path using dot notation (e.g., 'externalId', 'customFields.string1')
+        value: Value to set
+    """
+    if '.' in field_path:
+        # Handle nested fields
+        parts = field_path.split('.')
+        current = data
+        
+        # Navigate to the parent of the target field, creating dicts as needed
+        for part in parts[:-1]:
+            if part not in current or not isinstance(current[part], dict):
+                current[part] = {}
+            current = current[part]
+        
+        # Set the final value
+        current[parts[-1]] = value
+    else:
+        # Simple field
+        data[field_path] = value
+
+
+def sanitize_field_path_for_csv(field_path: str) -> str:
+    """
+    Sanitize a field path for use as a CSV column name by replacing dots with underscores.
+    
+    Args:
+        field_path: Field path (e.g., 'customFields.decimal1')
+        
+    Returns:
+        Sanitized field path (e.g., 'customFields_decimal1')
+    """
+    return field_path.replace('.', '_')
 
 
 def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
@@ -492,20 +564,21 @@ def is_numeric_only(value: str) -> bool:
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
                       use_existing_file: bool = False, allow_alpha: bool = False,
-                      department_id: str = None, custom_field: str = 'decimal1') -> tuple:
+                      department_id: str = None, destination_field: str = 'customFields.decimal1', source_field: str = 'externalId') -> tuple:
     """
-    Sync external IDs from 'externalId' field to the specified custom field.
+    Sync values from the source field to the specified destination field.
     
     Args:
         client: Authenticated AbsorbLMSClient instance
         dry_run: If True, only simulate the sync without making changes
         csv_file: Path to CSV file for storing user data
-        filter_blank: If True, only process users with null custom field value
-        overwrite: If True, update even if custom field already has a value
+        filter_blank: If True, only process users with null destination field value
+        overwrite: If True, update even if destination field already has a value
         use_existing_file: If True, skip download and use existing CSV file
-        allow_alpha: If True, allow alphanumeric externalIds; otherwise only numeric
+        allow_alpha: If True, allow alphanumeric source values; otherwise only numeric
         department_id: If provided, filter by departmentId
-        custom_field: Name of the custom field to sync to (default: decimal1)
+        destination_field: Full path to destination field (default: customFields.decimal1)
+        source_field: Name of the source field to sync from (default: externalId)
         
     Returns:
         Tuple of (success_count, error_count, skip_count)
@@ -513,23 +586,24 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     if csv_file is None:
         csv_file = f'users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
     
-    logging.info("Starting external ID sync...")
-    logging.info(f"Target custom field: customFields.{custom_field}")
+    logging.info("Starting field sync...")
+    logging.info(f"Source field: {source_field}")
+    logging.info(f"Destination field: {destination_field}")
     
     if dry_run:
         logging.info("DRY RUN MODE - No changes will be made")
     
     if filter_blank:
-        logging.info(f"Filtering for users with null/empty {custom_field} field only")
+        logging.info(f"Filtering for users with null/empty {destination_field} field only")
     
     if department_id:
         logging.info(f"Filtering for users in department: {department_id}")
     
     if not allow_alpha:
-        logging.info("Validating externalIds are numeric only (use --alpha to allow alphanumeric)")
+        logging.info(f"Validating {source_field} values are numeric only (use --alpha to allow alphanumeric)")
     
     if not overwrite:
-        logging.info(f"Will skip users where externalId doesn't match existing {custom_field} value (marked as 'Different')")
+        logging.info(f"Will skip users where {source_field} doesn't match existing {destination_field} value (marked as 'Different')")
     
     # Get all users and save incrementally to CSV, or use existing file
     if use_existing_file:
@@ -545,10 +619,10 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         logging.info(f"Found {users_count} users in CSV file")
     else:
         logging.info("Fetching users from Absorb LMS...")
-        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank, department_id=department_id, custom_field=custom_field)
+        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank, department_id=department_id, destination_field=destination_field, source_field=source_field)
     
     if users_count == 0:
-        logging.warning("No users with externalId found. Exiting.")
+        logging.warning(f"No users with {source_field} found. Exiting.")
         return 0, 0, 0
     
     # Ask for confirmation
@@ -597,12 +671,15 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             writer = csv.DictWriter(f_out, fieldnames=fieldnames)
             writer.writeheader()
             
+            # Get the destination field column name from CSV
+            dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
+            
             for row in reader:
                 user_id = row['id']
                 username = row['username']
-                external_id = row['externalId']
-                # Get current custom field value using dynamic column name
-                current_field_value = row.get(f'current_{custom_field}', '')
+                source_value = row[source_field]
+                # Get current destination field value using dynamic column name
+                current_field_value = row.get(dest_col_name, '')
                 user_data_json = row['user_data_json']
                 
                 try:
@@ -615,45 +692,45 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     f_out.flush()  # Flush after each row
                     continue
                 
-                # Check if externalId is blank but custom field is set
-                if not external_id and current_field_value:
+                # Check if source value is blank but destination field is set
+                if not source_value and current_field_value:
                     skip_user(row, 'Different', 
-                             f"Skipping user {username} (ID: {user_id}) - External ID is blank but {custom_field} is set: {current_field_value}",
+                             f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}",
                              writer, f_out)
                     continue
                 
-                # Skip users with blank externalId (and blank custom field, since we already handled blank external + set custom field)
-                if not external_id:
+                # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
+                if not source_value:
                     continue
                 
-                # Validate externalId format if not allowing alphanumeric
-                if not allow_alpha and not is_numeric_only(external_id):
+                # Validate source value format if not allowing alphanumeric
+                if not allow_alpha and not is_numeric_only(source_value):
                     skip_user(row, 'Wrong Format',
-                             f"Skipping user {username} (ID: {user_id}) - External ID '{external_id}' is not numeric (use --alpha to allow alphanumeric)",
+                             f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)",
                              writer, f_out)
                     continue
                 
                 # Check if we should skip this user based on overwrite flag
-                # For decimal fields, remove decimals for comparison (externalId is always whole number)
+                # For decimal fields, remove decimals for comparison (source value may be a whole number)
                 # For string fields, compare directly
                 current_field_int = parse_int_from_string(current_field_value)
-                external_id_int = parse_int_from_string(external_id)
+                source_value_int = parse_int_from_string(source_value)
                 
                 # Skip if values don't match and overwrite is False
-                if not overwrite and current_field_int is not None and current_field_int != external_id_int:
+                if not overwrite and current_field_int is not None and current_field_int != source_value_int:
                     skip_user(row, 'Different',
-                             f"Skipping user {username} (ID: {user_id}) - External ID: {external_id}, Current {custom_field}: {current_field_value} (different values)",
+                             f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)",
                              writer, f_out)
                     continue
                 
-                logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
+                logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
                 
                 if dry_run:
-                    logging.info(f"[DRY RUN] Would update customFields.{custom_field} to: {external_id}")
+                    logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
                     row['Status'] = 'Success'
                     success_count += 1
                 else:
-                    if client.update_user(user_data, external_id, custom_field):
+                    if client.update_user(user_data, source_value, destination_field):
                         logging.info(f"Successfully updated user {username}")
                         row['Status'] = 'Success'
                         success_count += 1
@@ -699,35 +776,47 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(
-        description='Absorb LMS External ID Sync - Synchronize externalId values to a custom field (default: customFields.decimal1)',
+        description='Absorb LMS Field Sync - Synchronize values from a source field to a destination field',
         epilog='''
 Examples:
   # Dry-run mode (default - preview changes without modifying data)
-  python absorb_sync.py
+  python absorb_sync.py --customField decimal1
   
   # Actually perform updates (requires --update flag)
-  python absorb_sync.py --update
+  python absorb_sync.py --customField decimal1 --update
   
-  # Sync to a different custom field (e.g., string1)
+  # Sync to a different custom field (e.g., string1) using --customField
   python absorb_sync.py --customField string1 --update
   
+  # Sync from a different source field (e.g., username)
+  python absorb_sync.py --sourceField username --customField string1 --update
+  
+  # Sync from a custom field to another custom field
+  python absorb_sync.py --sourceField customFields.string2 --customField decimal1 --update
+  
+  # Sync to any destination field using --destinationField
+  python absorb_sync.py --sourceField customFields.string1 --destinationField externalId --update
+  
+  # Sync from username to externalId
+  python absorb_sync.py --sourceField username --destinationField externalId --update
+  
   # Filter by department
-  python absorb_sync.py --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
+  python absorb_sync.py --customField decimal1 --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
   
-  # Only update users with blank custom field
-  python absorb_sync.py --blank --update
+  # Only update users with blank destination field
+  python absorb_sync.py --customField decimal1 --blank --update
   
-  # Update all users, even if custom field already has a different value
-  python absorb_sync.py --overwrite --update
+  # Update all users, even if destination field already has a different value
+  python absorb_sync.py --customField decimal1 --overwrite --update
   
-  # Allow alphanumeric externalIds (default: numeric only)
-  python absorb_sync.py --alpha --update
+  # Allow alphanumeric source values (default: numeric only)
+  python absorb_sync.py --customField decimal1 --alpha --update
   
   # Process existing CSV file instead of downloading
-  python absorb_sync.py --file users_20260219_123456.csv --update
+  python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
   
   # Combine multiple options
-  python absorb_sync.py --customField decimal2 --blank --department <dept-id> --alpha --update
+  python absorb_sync.py --sourceField externalId --customField decimal2 --blank --department <dept-id> --alpha --update
   
   # Debug mode (prints sensitive data including API keys)
   python absorb_sync.py --debug --dry-run
@@ -805,11 +894,28 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     )
     behavior_group.add_argument(
         '--customField',
-        default='decimal1',
+        default=None,
         metavar='FIELD',
         help='Custom field to sync to (e.g., decimal1, decimal2, string1, string2). '
              'Only specify the field name under customFields. Decimal fields will be converted to float, '
-             'string fields will remain as strings. Verify the field exists in your Absorb LMS instance. (default: decimal1)'
+             'string fields will remain as strings. Verify the field exists in your Absorb LMS instance. '
+             'Cannot be used with --destinationField. Either --customField or --destinationField is required.'
+    )
+    behavior_group.add_argument(
+        '--destinationField',
+        default=None,
+        metavar='FIELD',
+        help='Destination field to sync to (e.g., externalId, username, customFields.string1). '
+             'Use full field path with dot notation for nested fields. '
+             'Cannot be used with --customField. Either --customField or --destinationField is required.'
+    )
+    behavior_group.add_argument(
+        '--sourceField',
+        default='externalId',
+        metavar='FIELD',
+        help='Source field to sync from (default: externalId). Can be any field from the user object '
+             '(e.g., externalId, username, emailAddress) or a nested field like customFields.string1. '
+             'For custom fields, specify the full path (e.g., customFields.decimal1).'
     )
     
     # Debug options
@@ -821,6 +927,18 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     )
     
     args = parser.parse_args()
+    
+    # Validate that either --customField or --destinationField is provided, but not both
+    if args.customField and args.destinationField:
+        parser.error("Cannot use both --customField and --destinationField. Please specify only one.")
+    
+    # Require that one of the destination flags is specified
+    if not args.customField and not args.destinationField:
+        parser.error("Either --customField or --destinationField must be specified.")
+    
+    # Convert customField to full destination path for consistency
+    if args.customField:
+        args.destinationField = f'customFields.{args.customField}'
     
     # Handle dry-run vs update flag precedence
     # If --update is specified, disable dry-run (unless --dry-run is also explicitly set)
@@ -838,14 +956,8 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     setup_logging(args.log_file)
     
     logging.info("="*60)
-    logging.info("Absorb LMS External ID Sync")
+    logging.info("Absorb LMS Field Sync")
     logging.info("="*60)
-    
-    # Validate custom field name and provide a warning if it doesn't match expected patterns
-    import re
-    if not re.match(r'^(decimal|string|date|checkbox)\d+$', args.customField):
-        logging.warning(f"Custom field name '{args.customField}' does not match the standard Absorb LMS naming pattern (e.g., decimal1, string1, date1).")
-        logging.warning("Please verify this field exists in your Absorb LMS instance before proceeding.")
     
     try:
         # Determine CSV file path
@@ -877,7 +989,7 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
         if use_existing_file:
             logging.info(f"Using existing CSV file: {csv_file_path}")
         
-        # Sync external IDs
+        # Sync fields
         success_count, error_count, skip_count = sync_external_ids(
             client, 
             dry_run=args.dry_run,
@@ -887,7 +999,8 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
             use_existing_file=use_existing_file,
             allow_alpha=args.alpha,
             department_id=args.department,
-            custom_field=args.customField
+            destination_field=args.destinationField,
+            source_field=args.sourceField
         )
         
         # Exit with appropriate code
