@@ -25,7 +25,8 @@ Synchronize user external IDs from the `externalId` field to a custom field in A
 ### Core Functionality
 - Downloads `externalId` values from Absorb LMS user accounts
 - Uploads values to a configurable custom field (default: `customFields.decimal1` Associate Number field)
-- Supports any custom field type: `decimal1-10`, `string1-10`, `date1-10`, `checkbox1-10`
+- Supports custom field types: `decimal*` (converted to float) and `string*` (kept as string)
+- Also supports `date*` and `checkbox*` fields (treated as strings)
 - Requires `--update` flag for actual changes (default is dry-run mode)
 - Incremental CSV export for fault tolerance
 - User confirmation before processing updates
@@ -265,8 +266,12 @@ By default, the script validates that `externalId` values are numeric only.
 
 **Comparison Logic:**
 - For decimal fields: Decimals are removed before comparison (e.g., `8675309.00` → `8675309`)
-- For string fields: Direct string comparison is performed
+- For string/date/checkbox fields: Direct string comparison is performed
 - `externalId` is compared as-is (numeric by default, alphanumeric with `--alpha`)
+
+**Field Type Handling:**
+- Decimal fields (`decimal1`, `decimal2`, etc.): Values are converted to float type
+- String/date/checkbox fields: Values are kept as strings
 
 ## Status Values
 
@@ -295,7 +300,7 @@ users_20260219_123456.csv
 - **id** - User UUID
 - **username** - Username
 - **externalId** - External ID value
-- **current_decimal1** - Current value of the target custom field (column name remains `current_decimal1` for compatibility, but contains the value of whichever custom field is targeted)
+- **current_decimal1** - Current value of the target custom field (Note: The CSV column name is always `current_decimal1` for backward compatibility, regardless of which custom field is being synced)
 - **user_data_json** - Complete user profile as JSON (needed for PUT updates)
 
 ### Incremental Updates
