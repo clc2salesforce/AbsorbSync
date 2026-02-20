@@ -1,6 +1,6 @@
 # AbsorbSync
 
-Synchronize user data between fields in Absorb LMS. By default, syncs from `externalId` to `customFields.decimal1` (Associate Number), but can be configured to sync from any source field to any target custom field using the `--sourceField` and `--customField` flags.
+Synchronize user data between fields in Absorb LMS. By default, syncs from `externalId` to `customFields.decimal1` (Associate Number), but can be configured to sync from any source field to any destination field using the `--sourceField` and `--customField` or `--destinationField` flags.
 
 ## Table of Contents
 
@@ -24,8 +24,11 @@ Synchronize user data between fields in Absorb LMS. By default, syncs from `exte
 
 ### Core Functionality
 - Downloads values from any source field (default: `externalId`) in Absorb LMS user accounts
-- Uploads values to a configurable custom field (default: `customFields.decimal1` Associate Number field)
-- Supports syncing from standard user fields (e.g., `externalId`, `username`, `emailAddress`) or custom fields (e.g., `customFields.string1`)
+- Uploads values to any destination field (default: `customFields.decimal1` Associate Number field)
+- Supports syncing from/to standard user fields (e.g., `externalId`, `username`, `emailAddress`) or custom fields (e.g., `customFields.string1`)
+- Two ways to specify destination:
+  - `--customField`: Shorthand for custom fields only (e.g., `decimal1` becomes `customFields.decimal1`)
+  - `--destinationField`: Full field path for any destination (e.g., `externalId`, `customFields.string1`)
 - Supports custom field types: `decimal*` (converted to float) and `string*` (kept as string)
 - Also supports `date*` and `checkbox*` fields (treated as strings)
 - Requires `--update` flag for actual changes (default is dry-run mode)
@@ -110,8 +113,11 @@ python absorb_sync.py --help
 - `--secrets FILE` - Path to secrets file (default: `secrets.txt`)
 - `--log-file FILE` - Path to log file (default: `logs/absorb_sync_YYYYMMDD_HHMMSS.log`)
 - `--csv-file FILE` - Path to CSV file for user data (default: `users_YYYYMMDD_HHMMSS.csv`)
-- `--customField FIELD` - Target custom field name (default: `decimal1`). Specify only the field name without the `customFields` prefix. Examples: `decimal1`, `decimal2`, `string1`, `string2`, `date1`, `checkbox1`. The script validates that field names match the standard Absorb LMS pattern (e.g., `decimal1`, `string1`) and warns if an unusual field name is provided. Users should verify the field exists in their Absorb LMS instance before running.
+
+#### Field Selection Options
 - `--sourceField FIELD` - Source field to sync from (default: `externalId`). Can be any field from the user object (e.g., `externalId`, `username`, `emailAddress`) or a nested field like `customFields.string1`. For custom fields, specify the full path (e.g., `customFields.decimal1`).
+- `--customField FIELD` - Shorthand for syncing to a custom field. Specify only the field name without the `customFields` prefix (e.g., `decimal1`, `string1`). The script automatically prepends `customFields.` to the field name. Cannot be used with `--destinationField`. If neither `--customField` nor `--destinationField` is specified, defaults to `decimal1`.
+- `--destinationField FIELD` - Full path to any destination field (e.g., `externalId`, `username`, `customFields.string1`). Use this for non-custom fields or when you want full control over the field path. Cannot be used with `--customField`.
 
 #### Processing Mode Options
 - `--update` - Actually perform updates (default is dry-run mode)
@@ -119,11 +125,11 @@ python absorb_sync.py --help
 - `--file FILE` - Process existing CSV file instead of downloading from API
 
 #### Filtering Options
-- `--blank` - Filter to only users with null/empty target custom field (e.g., `decimal1` by default)
+- `--blank` - Filter to only users with null/empty destination field
 - `--department DEPT_ID` - Filter by departmentId UUID
 
 #### Validation and Behavior Options
-- `--overwrite` - Update custom field even if it has a different value (default: skip and mark as "Different")
+- `--overwrite` - Update destination field even if it has a different value (default: skip and mark as "Different")
 - `--alpha` - Allow alphanumeric source field values (default: numeric only, non-numeric marked as "Wrong Format")
 
 #### Debug Options
@@ -143,7 +149,7 @@ python absorb_sync.py --update
 # Use custom configuration files
 python absorb_sync.py --secrets prod_secrets.txt --log-file logs/production.log --update
 
-# Sync to a different custom field
+# Sync to a different custom field using --customField
 python absorb_sync.py --customField string1 --update
 
 # Sync to decimal2 instead of decimal1
@@ -154,6 +160,12 @@ python absorb_sync.py --sourceField username --customField string1 --update
 
 # Sync from one custom field to another (e.g., string2 to decimal1)
 python absorb_sync.py --sourceField customFields.string2 --customField decimal1 --update
+
+# Sync to any field using --destinationField (e.g., username to externalId)
+python absorb_sync.py --sourceField username --destinationField externalId --update
+
+# Sync from a custom field to a standard field
+python absorb_sync.py --sourceField customFields.string1 --destinationField username --update
 ```
 
 #### Filtering Examples
@@ -216,19 +228,26 @@ python absorb_sync.py \
   --customField string3 \
   --alpha \
   --update
-```
+
+# Use --destinationField to sync to any field (not just customFields)
+python absorb_sync.py \
+  --sourceField customFields.decimal1 \
+  --destinationField externalId \
+  --update
 ```
 
 ## Filtering Options
 
 ### --blank Flag
-Uses OData filter syntax to download only users where the target custom field is null or empty.
+Uses OData filter syntax to download only users where the destination field is null or empty.
 
-**OData Filter:** `_filter=customFields/{customField} eq null` (e.g., `customFields/decimal1 eq null` by default)
+**OData Filter:** 
+- For custom fields: `_filter=customFields/{fieldName} eq null` (e.g., `customFields/decimal1 eq null`)
+- For standard fields: `_filter={fieldName} eq null` (e.g., `externalId eq null`)
 
 **Use Case:** Reduces download time for large user databases by only fetching users that need updating.
 
-**Note:** The filter uses the field specified by `--customField` (default: `decimal1`).
+**Note:** The filter uses the destination field specified by `--customField` or `--destinationField`.
 
 ### --department Flag
 Filters users by department ID UUID.
@@ -239,7 +258,7 @@ Filters users by department ID UUID.
 
 **Combining Filters:** The script combines multiple filters using the `and` operator:
 ```
-_filter=(customFields/{customField} eq null) and (departmentId eq guid'<department-id>')
+_filter=(customFields/{fieldName} eq null) and (departmentId eq guid'<department-id>')
 ```
 
 **Example with custom field:**
@@ -263,21 +282,21 @@ By default, the script validates that source field values are numeric only.
 
 ### Blank Source Field Handling
 
-**Case 1: Blank source field, blank target custom field**
+**Case 1: Blank source field, blank destination field**
 - User is silently skipped (no action needed)
 
-**Case 2: Blank source field, populated target custom field**
+**Case 2: Blank source field, populated destination field**
 - User is marked as "Different" and skipped
 - Prevents accidentally clearing populated fields
 
 ### Overwrite Behavior
 
 **Without --overwrite flag (default):**
-- If source field value doesn't match the target custom field value (after removing decimals for decimal fields), user is marked as "Different" and skipped
-- Only updates users where the target custom field is blank or matches the source field value
+- If source field value doesn't match the destination field value (after removing decimals for decimal fields), user is marked as "Different" and skipped
+- Only updates users where the destination field is blank or matches the source field value
 
 **With --overwrite flag:**
-- All users are updated regardless of current custom field value
+- All users are updated regardless of current destination field value
 - Existing different values are replaced
 
 **Comparison Logic:**
@@ -298,7 +317,7 @@ The CSV file tracks processing status for each user:
 | **Retrieved** | User downloaded from API, not yet processed |
 | **Success** | User successfully updated in Absorb LMS |
 | **Failure** | Update failed (error logged) |
-| **Different** | Skipped because source field value doesn't match the target custom field (when --overwrite not used), OR source field is blank but the target custom field is populated |
+| **Different** | Skipped because source field value doesn't match the destination field (when --overwrite not used), OR source field is blank but the destination field is populated |
 | **Wrong Format** | Source field value contains non-numeric characters (when --alpha not used) |
 
 ## CSV Files
@@ -319,9 +338,10 @@ users_20260219_123456.csv
   - If using `--sourceField externalId` (default), the column is named `externalId`
   - If using `--sourceField username`, the column is named `username`
   - If using `--sourceField customFields.string1`, the column is named `customFields.string1`
-- **Target field column** - The column name follows the pattern `current_{field}` where `{field}` is the custom field specified with `--customField`. For example:
-  - If using `--customField decimal1` (default), the column is named `current_decimal1`
-  - If using `--customField string1`, the column is named `current_string1`
+- **Destination field column** - The column name follows the pattern `current_{sanitized_field_path}` where dots are replaced with underscores. For example:
+  - If using `--customField decimal1` (default), which becomes `customFields.decimal1`, the column is named `current_customFields_decimal1`
+  - If using `--destinationField externalId`, the column is named `current_externalId`
+  - If using `--destinationField customFields.string1`, the column is named `current_customFields_string1`
 - **user_data_json** - Complete user profile as JSON (needed for PUT updates)
 
 ### Incremental Updates
