@@ -238,7 +238,7 @@ class AbsorbLMSClient:
         users_with_source_field = 0
         
         # Extract column name for CSV
-        dest_col_name = f'current_{destination_field.replace(".", "_")}'
+        dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
         
         # Open CSV file and write header
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
@@ -441,6 +441,19 @@ def set_nested_field_value(data: Dict[str, Any], field_path: str, value: Any) ->
     else:
         # Simple field
         data[field_path] = value
+
+
+def sanitize_field_path_for_csv(field_path: str) -> str:
+    """
+    Sanitize a field path for use as a CSV column name by replacing dots with underscores.
+    
+    Args:
+        field_path: Field path (e.g., 'customFields.decimal1')
+        
+    Returns:
+        Sanitized field path (e.g., 'customFields_decimal1')
+    """
+    return field_path.replace('.', '_')
 
 
 def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
@@ -659,7 +672,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             writer.writeheader()
             
             # Get the destination field column name from CSV
-            dest_col_name = f'current_{destination_field.replace(".", "_")}'
+            dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
             
             for row in reader:
                 user_id = row['id']
@@ -881,7 +894,7 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     )
     behavior_group.add_argument(
         '--customField',
-        default=None,
+        default=None,  # Actual default (decimal1) is set later if neither flag is provided
         metavar='FIELD',
         help='Custom field to sync to (e.g., decimal1, decimal2, string1, string2). '
              'Only specify the field name under customFields. Decimal fields will be converted to float, '
@@ -890,7 +903,7 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     )
     behavior_group.add_argument(
         '--destinationField',
-        default=None,
+        default=None,  # Must be None to detect if user provided this flag
         metavar='FIELD',
         help='Destination field to sync to (e.g., externalId, username, customFields.string1). '
              'Use full field path with dot notation for nested fields. '
@@ -926,9 +939,6 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     # Convert customField to full destination path for consistency
     if args.customField:
         args.destinationField = f'customFields.{args.customField}'
-        destination_field_display = f'customFields.{args.customField}'
-    else:
-        destination_field_display = args.destinationField
     
     # Handle dry-run vs update flag precedence
     # If --update is specified, disable dry-run (unless --dry-run is also explicitly set)
