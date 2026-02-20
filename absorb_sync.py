@@ -780,10 +780,10 @@ def main():
         epilog='''
 Examples:
   # Dry-run mode (default - preview changes without modifying data)
-  python absorb_sync.py
+  python absorb_sync.py --customField decimal1
   
   # Actually perform updates (requires --update flag)
-  python absorb_sync.py --update
+  python absorb_sync.py --customField decimal1 --update
   
   # Sync to a different custom field (e.g., string1) using --customField
   python absorb_sync.py --customField string1 --update
@@ -801,19 +801,19 @@ Examples:
   python absorb_sync.py --sourceField username --destinationField externalId --update
   
   # Filter by department
-  python absorb_sync.py --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
+  python absorb_sync.py --customField decimal1 --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
   
   # Only update users with blank destination field
-  python absorb_sync.py --blank --update
+  python absorb_sync.py --customField decimal1 --blank --update
   
   # Update all users, even if destination field already has a different value
-  python absorb_sync.py --overwrite --update
+  python absorb_sync.py --customField decimal1 --overwrite --update
   
   # Allow alphanumeric source values (default: numeric only)
-  python absorb_sync.py --alpha --update
+  python absorb_sync.py --customField decimal1 --alpha --update
   
   # Process existing CSV file instead of downloading
-  python absorb_sync.py --file users_20260219_123456.csv --update
+  python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
   
   # Combine multiple options
   python absorb_sync.py --sourceField externalId --customField decimal2 --blank --department <dept-id> --alpha --update
@@ -894,20 +894,20 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     )
     behavior_group.add_argument(
         '--customField',
-        default=None,  # Actual default (decimal1) is set later if neither flag is provided
+        default=None,
         metavar='FIELD',
         help='Custom field to sync to (e.g., decimal1, decimal2, string1, string2). '
              'Only specify the field name under customFields. Decimal fields will be converted to float, '
              'string fields will remain as strings. Verify the field exists in your Absorb LMS instance. '
-             'Cannot be used with --destinationField. If neither --customField nor --destinationField is specified, defaults to decimal1.'
+             'Cannot be used with --destinationField. Either --customField or --destinationField is required.'
     )
     behavior_group.add_argument(
         '--destinationField',
-        default=None,  # Must be None to detect if user provided this flag
+        default=None,
         metavar='FIELD',
         help='Destination field to sync to (e.g., externalId, username, customFields.string1). '
              'Use full field path with dot notation for nested fields. '
-             'Cannot be used with --customField.'
+             'Cannot be used with --customField. Either --customField or --destinationField is required.'
     )
     behavior_group.add_argument(
         '--sourceField',
@@ -932,9 +932,9 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     if args.customField and args.destinationField:
         parser.error("Cannot use both --customField and --destinationField. Please specify only one.")
     
-    # Set default destination field if neither is specified
+    # Require that one of the destination flags is specified
     if not args.customField and not args.destinationField:
-        args.customField = 'decimal1'
+        parser.error("Either --customField or --destinationField must be specified.")
     
     # Convert customField to full destination path for consistency
     if args.customField:

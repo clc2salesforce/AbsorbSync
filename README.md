@@ -1,6 +1,6 @@
 # AbsorbSync
 
-Synchronize user data between fields in Absorb LMS. By default, syncs from `externalId` to `customFields.decimal1` (Associate Number), but can be configured to sync from any source field to any destination field using the `--sourceField` and `--customField` or `--destinationField` flags.
+Synchronize user data between fields in Absorb LMS. Syncs from a source field (default: `externalId`) to any destination field. You must specify either `--customField` or `--destinationField` to define the destination.
 
 ## Table of Contents
 
@@ -24,9 +24,9 @@ Synchronize user data between fields in Absorb LMS. By default, syncs from `exte
 
 ### Core Functionality
 - Downloads values from any source field (default: `externalId`) in Absorb LMS user accounts
-- Uploads values to any destination field (default: `customFields.decimal1` Associate Number field)
+- Uploads values to any destination field (must be specified with `--customField` or `--destinationField`)
 - Supports syncing from/to standard user fields (e.g., `externalId`, `username`, `emailAddress`) or custom fields (e.g., `customFields.string1`)
-- Two ways to specify destination:
+- Two ways to specify destination (one is required):
   - `--customField`: Shorthand for custom fields only (e.g., `decimal1` becomes `customFields.decimal1`)
   - `--destinationField`: Full field path for any destination (e.g., `externalId`, `customFields.string1`)
 - Supports custom field types: `decimal*` (converted to float) and `string*` (kept as string)
@@ -98,10 +98,10 @@ ABSORB_API_PASSWORD=your_password
 
 ```bash
 # Preview changes (dry-run mode - default)
-python absorb_sync.py
+python absorb_sync.py --customField decimal1
 
 # Actually perform updates (requires --update flag)
-python absorb_sync.py --update
+python absorb_sync.py --customField decimal1 --update
 
 # Get help
 python absorb_sync.py --help
@@ -116,8 +116,8 @@ python absorb_sync.py --help
 
 #### Field Selection Options
 - `--sourceField FIELD` - Source field to sync from (default: `externalId`). Can be any field from the user object (e.g., `externalId`, `username`, `emailAddress`) or a nested field like `customFields.string1`. For custom fields, specify the full path (e.g., `customFields.decimal1`).
-- `--customField FIELD` - Shorthand for syncing to a custom field. Specify only the field name without the `customFields` prefix (e.g., `decimal1`, `string1`). The script automatically prepends `customFields.` to the field name. Cannot be used with `--destinationField`. If neither `--customField` nor `--destinationField` is specified, defaults to `decimal1`.
-- `--destinationField FIELD` - Full path to any destination field (e.g., `externalId`, `username`, `customFields.string1`). Use this for non-custom fields or when you want full control over the field path. Cannot be used with `--customField`.
+- `--customField FIELD` - **Required** (unless `--destinationField` is used). Shorthand for syncing to a custom field. Specify only the field name without the `customFields` prefix (e.g., `decimal1`, `string1`). The script automatically prepends `customFields.` to the field name. Cannot be used with `--destinationField`.
+- `--destinationField FIELD` - **Required** (unless `--customField` is used). Full path to any destination field (e.g., `externalId`, `username`, `customFields.string1`). Use this for non-custom fields or when you want full control over the field path. Cannot be used with `--customField`.
 
 #### Processing Mode Options
 - `--update` - Actually perform updates (default is dry-run mode)
@@ -141,13 +141,13 @@ python absorb_sync.py --help
 
 ```bash
 # Dry-run to preview changes (default behavior)
-python absorb_sync.py
+python absorb_sync.py --customField decimal1
 
 # Perform actual updates
-python absorb_sync.py --update
+python absorb_sync.py --customField decimal1 --update
 
 # Use custom configuration files
-python absorb_sync.py --secrets prod_secrets.txt --log-file logs/production.log --update
+python absorb_sync.py --customField decimal1 --secrets prod_secrets.txt --log-file logs/production.log --update
 
 # Sync to a different custom field using --customField
 python absorb_sync.py --customField string1 --update
@@ -171,14 +171,14 @@ python absorb_sync.py --sourceField customFields.string1 --destinationField user
 #### Filtering Examples
 
 ```bash
-# Only update users with blank custom field (default: decimal1)
-python absorb_sync.py --blank --update
+# Only update users with blank custom field
+python absorb_sync.py --customField decimal1 --blank --update
 
 # Filter by specific department
-python absorb_sync.py --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
+python absorb_sync.py --customField decimal1 --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
 
 # Combine filters: blank custom field in specific department
-python absorb_sync.py --blank --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
+python absorb_sync.py --customField decimal1 --blank --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
 
 # Only update users with blank string1 field
 python absorb_sync.py --customField string1 --blank --update
@@ -188,26 +188,27 @@ python absorb_sync.py --customField string1 --blank --update
 
 ```bash
 # Allow alphanumeric source values (default is numeric only)
-python absorb_sync.py --alpha --update
+python absorb_sync.py --customField decimal1 --alpha --update
 
 # Overwrite existing decimal1 values even if different
-python absorb_sync.py --overwrite --update
+python absorb_sync.py --customField decimal1 --overwrite --update
 
 # Combine: allow alphanumeric and overwrite existing values
-python absorb_sync.py --alpha --overwrite --update
+python absorb_sync.py --customField decimal1 --alpha --overwrite --update
 ```
 
 #### Advanced Examples
 
 ```bash
 # Process existing CSV file (skip download)
-python absorb_sync.py --file users_20260219_123456.csv --update
+python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
 
 # Debug mode for troubleshooting (prints API keys in cleartext)
-python absorb_sync.py --debug --dry-run
+python absorb_sync.py --customField decimal1 --debug --dry-run
 
 # Complete example: filter, validate, and update specific department
 python absorb_sync.py \
+  --customField decimal1 \
   --department c458459d-2f86-4c66-a481-e17e6983f7ee \
   --blank \
   --alpha \
