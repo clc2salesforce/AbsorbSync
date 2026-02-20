@@ -249,7 +249,7 @@ class AbsorbLMSClient:
                 if filter_blank:
                     filters.append("customFields/decimal1 eq null")
                 if department_id:
-                    filters.append(f"departmentId eq '{department_id}'")
+                    filters.append(f"departmentId eq {department_id}")
                 
                 # Combine filters with 'and' if multiple
                 if filters:
@@ -308,12 +308,13 @@ class AbsorbLMSClient:
                         if len(page_users) < page_size:
                             break
                     else:
-                        logging.error(f"Failed to retrieve users: {response.status_code} - {response.text}")
-                        break
+                        error_msg = f"Failed to retrieve users: {response.status_code} - {response.text}"
+                        logging.error(error_msg)
+                        raise RuntimeError(error_msg)
                         
                 except Exception as e:
                     logging.error(f"Error retrieving users: {str(e)}")
-                    break
+                    raise
         
         logging.info(f"Total users with externalId saved to CSV: {users_with_external_id}")
         return users_with_external_id
