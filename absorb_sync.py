@@ -3,13 +3,15 @@
 Absorb LMS External ID Sync Script
 
 This script downloads the 'external ID' field from Absorb LMS user accounts
-and uploads it back to the same users' 'Associate Number' field. Note: the 'Associate Number' field is a custom field that is referenced based on the order it was created. In this case, it is the first custom field created, so it is accessed as 'customFields.decimal1' in the API.
+and uploads it back to a specified custom field. By default, it targets the 'Associate Number' field (customFields.decimal1), 
+but can be configured to sync to any custom field using the --customField flag (e.g., decimal1, string1, string2, etc.).
 
 Features:
 - Exponential backoff retry logic
 - Text file logging
 - Dry run mode
 - Secrets loaded from external file
+- Configurable target custom field
 """
 
 import argparse
@@ -214,15 +216,16 @@ class AbsorbLMSClient:
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
-    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False, department_id: str = None) -> int:
+    def get_users_incremental(self, page_size: int = 500, csv_file: str = None, filter_blank: bool = False, department_id: str = None, custom_field: str = 'decimal1') -> int:
         """
         Retrieve all users from Absorb LMS with pagination and save to CSV incrementally.
         
         Args:
             page_size: Number of users to retrieve per page (default: 500)
             csv_file: Path to CSV file to save users incrementally
-            filter_blank: If True, only retrieve users where customFields/decimal1 is null
+            filter_blank: If True, only retrieve users where the custom field is null
             department_id: If provided, filter by departmentId
+            custom_field: Name of the custom field to sync (default: decimal1)
             
         Returns:
             Total number of users with externalId retrieved
@@ -235,7 +238,7 @@ class AbsorbLMSClient:
         # Open CSV file and write header
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Status', 'id', 'username', 'externalId', 'current_decimal1', 'user_data_json'])
+            writer.writerow(['Status', 'id', 'username', 'externalId', f'current_{custom_field}', 'user_data_json'])
             
             while True:
                 url = f"{self.api_url}/users"
@@ -247,7 +250,7 @@ class AbsorbLMSClient:
                 # Build OData filter
                 filters = []
                 if filter_blank:
-                    filters.append("customFields/decimal1 eq null")
+                    filters.append(f"customFields/{custom_field} eq null")
                 if department_id:
                     filters.append(f"departmentId eq guid'{department_id}'")
                 
@@ -285,14 +288,14 @@ class AbsorbLMSClient:
                             if not external_id:
                                 continue
                             
-                            # Get current decimal1 value
+                            # Get current custom field value
                             custom_fields = user.get('customFields') or {}
-                            current_decimal1 = custom_fields.get('decimal1', '')
+                            current_custom_field_value = custom_fields.get(custom_field, '')
                             
                             # Store entire user data as JSON for PUT later
                             user_data_json = json.dumps(user)
                             
-                            writer.writerow(['Retrieved', user_id, username, external_id, current_decimal1, user_data_json])
+                            writer.writerow(['Retrieved', user_id, username, external_id, current_custom_field_value, user_data_json])
                             batch_count += 1
                             users_with_external_id += 1
                         
@@ -319,13 +322,14 @@ class AbsorbLMSClient:
         logging.info(f"Total users with externalId saved to CSV: {users_with_external_id}")
         return users_with_external_id
     
-    def update_user(self, user_data: Dict[str, Any], external_id: str) -> bool:
+    def update_user(self, user_data: Dict[str, Any], external_id: str, custom_field: str = 'decimal1') -> bool:
         """
-        Update a user's customFields.decimal1 with the externalId value.
+        Update a user's custom field with the externalId value.
         
         Args:
             user_data: Complete user data dictionary
-            external_id: External ID value to set in customFields.decimal1
+            external_id: External ID value to set in the custom field
+            custom_field: Name of the custom field to update (default: decimal1)
             
         Returns:
             bool: True if update successful, False otherwise
@@ -334,18 +338,24 @@ class AbsorbLMSClient:
         url = f"{self.api_url}/users/{user_id}"
         
         try:
-            # Update customFields.decimal1 with the externalId
+            # Update the specified custom field with the externalId
             if 'customFields' not in user_data or user_data['customFields'] is None:
                 user_data['customFields'] = {}
             
-            # Convert externalId to float for decimal1
-            try:
-                decimal_value = float(external_id)
-            except (ValueError, TypeError):
-                logging.warning(f"Cannot convert externalId '{external_id}' to decimal for user {user_id}")
-                return False
+            # Determine the appropriate value type based on the custom field name
+            # decimal fields (decimal1, decimal2, etc.) need to be floats
+            # string fields (string1, string2, etc.) can remain as strings
+            if custom_field.startswith('decimal'):
+                try:
+                    field_value = float(external_id)
+                except (ValueError, TypeError):
+                    logging.warning(f"Cannot convert externalId '{external_id}' to decimal for user {user_id}")
+                    return False
+            else:
+                # For string fields and others, use the value as-is
+                field_value = external_id
             
-            user_data['customFields']['decimal1'] = decimal_value
+            user_data['customFields'][custom_field] = field_value
             
             # PUT the entire user profile back
             headers = {
@@ -479,19 +489,20 @@ def is_numeric_only(value: str) -> bool:
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
                       use_existing_file: bool = False, allow_alpha: bool = False,
-                      department_id: str = None) -> tuple:
+                      department_id: str = None, custom_field: str = 'decimal1') -> tuple:
     """
-    Sync external IDs from 'externalId' field to 'customFields.decimal1' field.
+    Sync external IDs from 'externalId' field to the specified custom field.
     
     Args:
         client: Authenticated AbsorbLMSClient instance
         dry_run: If True, only simulate the sync without making changes
         csv_file: Path to CSV file for storing user data
-        filter_blank: If True, only process users with null decimal1
-        overwrite: If True, update even if decimal1 already has a value
+        filter_blank: If True, only process users with null custom field value
+        overwrite: If True, update even if custom field already has a value
         use_existing_file: If True, skip download and use existing CSV file
         allow_alpha: If True, allow alphanumeric externalIds; otherwise only numeric
         department_id: If provided, filter by departmentId
+        custom_field: Name of the custom field to sync to (default: decimal1)
         
     Returns:
         Tuple of (success_count, error_count, skip_count)
@@ -500,12 +511,13 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         csv_file = f'users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
     
     logging.info("Starting external ID sync...")
+    logging.info(f"Target custom field: customFields.{custom_field}")
     
     if dry_run:
         logging.info("DRY RUN MODE - No changes will be made")
     
     if filter_blank:
-        logging.info("Filtering for users with null/empty decimal1 field only")
+        logging.info(f"Filtering for users with null/empty {custom_field} field only")
     
     if department_id:
         logging.info(f"Filtering for users in department: {department_id}")
@@ -514,7 +526,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         logging.info("Validating externalIds are numeric only (use --alpha to allow alphanumeric)")
     
     if not overwrite:
-        logging.info("Will skip users where externalId doesn't match existing decimal1 value (marked as 'Different')")
+        logging.info(f"Will skip users where externalId doesn't match existing {custom_field} value (marked as 'Different')")
     
     # Get all users and save incrementally to CSV, or use existing file
     if use_existing_file:
@@ -530,7 +542,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         logging.info(f"Found {users_count} users in CSV file")
     else:
         logging.info("Fetching users from Absorb LMS...")
-        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank, department_id=department_id)
+        users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank, department_id=department_id, custom_field=custom_field)
     
     if users_count == 0:
         logging.warning("No users with externalId found. Exiting.")
@@ -586,7 +598,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 user_id = row['id']
                 username = row['username']
                 external_id = row['externalId']
-                current_decimal1 = row.get('current_decimal1', '')
+                # Get current custom field value using dynamic column name
+                current_field_value = row.get(f'current_{custom_field}', '')
                 user_data_json = row['user_data_json']
                 
                 try:
@@ -599,14 +612,14 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     f_out.flush()  # Flush after each row
                     continue
                 
-                # Check if externalId is blank but decimal1 is set
-                if not external_id and current_decimal1:
+                # Check if externalId is blank but custom field is set
+                if not external_id and current_field_value:
                     skip_user(row, 'Different', 
-                             f"Skipping user {username} (ID: {user_id}) - External ID is blank but decimal1 is set: {current_decimal1}",
+                             f"Skipping user {username} (ID: {user_id}) - External ID is blank but {custom_field} is set: {current_field_value}",
                              writer, f_out)
                     continue
                 
-                # Skip users with blank externalId (and blank decimal1, since we already handled blank external + set decimal1)
+                # Skip users with blank externalId (and blank custom field, since we already handled blank external + set custom field)
                 if not external_id:
                     continue
                 
@@ -618,25 +631,26 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     continue
                 
                 # Check if we should skip this user based on overwrite flag
-                # Remove decimals from decimal1 for comparison (externalId is always whole number)
-                current_decimal1_int = parse_int_from_string(current_decimal1)
+                # For decimal fields, remove decimals for comparison (externalId is always whole number)
+                # For string fields, compare directly
+                current_field_int = parse_int_from_string(current_field_value)
                 external_id_int = parse_int_from_string(external_id)
                 
                 # Skip if values don't match and overwrite is False
-                if not overwrite and current_decimal1_int is not None and current_decimal1_int != external_id_int:
+                if not overwrite and current_field_int is not None and current_field_int != external_id_int:
                     skip_user(row, 'Different',
-                             f"Skipping user {username} (ID: {user_id}) - External ID: {external_id}, Current decimal1: {current_decimal1} (different values)",
+                             f"Skipping user {username} (ID: {user_id}) - External ID: {external_id}, Current {custom_field}: {current_field_value} (different values)",
                              writer, f_out)
                     continue
                 
                 logging.info(f"Processing user {username} (ID: {user_id}) - External ID: {external_id}")
                 
                 if dry_run:
-                    logging.info(f"[DRY RUN] Would update customFields.decimal1 to: {external_id}")
+                    logging.info(f"[DRY RUN] Would update customFields.{custom_field} to: {external_id}")
                     row['Status'] = 'Success'
                     success_count += 1
                 else:
-                    if client.update_user(user_data, external_id):
+                    if client.update_user(user_data, external_id, custom_field):
                         logging.info(f"Successfully updated user {username}")
                         row['Status'] = 'Success'
                         success_count += 1
@@ -682,7 +696,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(
-        description='Absorb LMS External ID Sync - Synchronize externalId values to customFields.decimal1',
+        description='Absorb LMS External ID Sync - Synchronize externalId values to a custom field (default: customFields.decimal1)',
         epilog='''
 Examples:
   # Dry-run mode (default - preview changes without modifying data)
@@ -691,13 +705,16 @@ Examples:
   # Actually perform updates (requires --update flag)
   python absorb_sync.py --update
   
+  # Sync to a different custom field (e.g., string1)
+  python absorb_sync.py --customField string1 --update
+  
   # Filter by department
   python absorb_sync.py --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
   
-  # Only update users with blank decimal1 field
+  # Only update users with blank custom field
   python absorb_sync.py --blank --update
   
-  # Update all users, even if decimal1 already has a different value
+  # Update all users, even if custom field already has a different value
   python absorb_sync.py --overwrite --update
   
   # Allow alphanumeric externalIds (default: numeric only)
@@ -706,8 +723,8 @@ Examples:
   # Process existing CSV file instead of downloading
   python absorb_sync.py --file users_20260219_123456.csv --update
   
-  # Combine multiple filters
-  python absorb_sync.py --blank --department <dept-id> --alpha --update
+  # Combine multiple options
+  python absorb_sync.py --customField decimal2 --blank --department <dept-id> --alpha --update
   
   # Debug mode (prints sensitive data including API keys)
   python absorb_sync.py --debug --dry-run
@@ -762,7 +779,7 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     filter_group.add_argument(
         '--blank',
         action='store_true',
-        help='Filter to only users with null/empty decimal1 field (uses OData filter)'
+        help='Filter to only users with null/empty custom field (uses OData filter)'
     )
     filter_group.add_argument(
         '--department',
@@ -776,12 +793,18 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     behavior_group.add_argument(
         '--overwrite',
         action='store_true',
-        help='Update decimal1 even if it already has a different value (default: skip and mark as "Different")'
+        help='Update custom field even if it already has a different value (default: skip and mark as "Different")'
     )
     behavior_group.add_argument(
         '--alpha',
         action='store_true',
         help='Allow alphanumeric externalIds (default: numeric only, non-numeric marked as "Wrong Format")'
+    )
+    behavior_group.add_argument(
+        '--customField',
+        default='decimal1',
+        metavar='FIELD',
+        help='Custom field to sync to (e.g., decimal1, string1, string2). Only specify the field name under customFields (default: decimal1)'
     )
     
     # Debug options
@@ -852,7 +875,8 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
             overwrite=args.overwrite,
             use_existing_file=use_existing_file,
             allow_alpha=args.alpha,
-            department_id=args.department
+            department_id=args.department,
+            custom_field=args.customField
         )
         
         # Exit with appropriate code
