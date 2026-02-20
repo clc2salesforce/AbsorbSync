@@ -647,21 +647,25 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 
                 writer.writerow(row)
                 f_out.flush()  # Flush after each row to ensure it's written to disk
-            
-            # Replace original CSV with updated one
-            if not dry_run:
-                os.replace(temp_csv, csv_file)
-                logging.info(f"Updated CSV saved to {csv_file}")
-            else:
-                # In dry-run, remove temp file
-                if os.path.exists(temp_csv):
-                    os.remove(temp_csv)
+        
+        # Files are now closed, safe to replace or remove
+        # Replace original CSV with updated one
+        if not dry_run:
+            os.replace(temp_csv, csv_file)
+            logging.info(f"Updated CSV saved to {csv_file}")
+        else:
+            # In dry-run, remove temp file
+            if os.path.exists(temp_csv):
+                os.remove(temp_csv)
     
     except Exception as e:
         logging.error(f"Error during processing: {e}")
-        # Clean up temp file on error
+        # Clean up temp file on error (files are closed due to exception)
         if temp_csv and os.path.exists(temp_csv):
-            os.remove(temp_csv)
+            try:
+                os.remove(temp_csv)
+            except OSError as cleanup_error:
+                logging.warning(f"Could not remove temporary file {temp_csv}: {cleanup_error}")
         raise
     
     logging.info(f"\n{'='*60}")
