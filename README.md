@@ -315,8 +315,13 @@ users_20260219_123456.csv
 - **Status** - Processing status (Retrieved, Success, Failure, Different, Wrong Format)
 - **id** - User UUID
 - **username** - Username
-- **{sourceField}** - Source field value (column name matches the source field, e.g., `externalId`, `username`, `customFields.string1`)
-- **current_{customField}** - Current value of the target custom field (column name reflects the custom field being synced to)
+- **Source field column** - The column name matches the source field specified with `--sourceField`. For example:
+  - If using `--sourceField externalId` (default), the column is named `externalId`
+  - If using `--sourceField username`, the column is named `username`
+  - If using `--sourceField customFields.string1`, the column is named `customFields.string1`
+- **Target field column** - The column name follows the pattern `current_{field}` where `{field}` is the custom field specified with `--customField`. For example:
+  - If using `--customField decimal1` (default), the column is named `current_decimal1`
+  - If using `--customField string1`, the column is named `current_string1`
 - **user_data_json** - Complete user profile as JSON (needed for PUT updates)
 
 ### Incremental Updates
