@@ -109,7 +109,7 @@ python absorb_sync.py --help
 - `--secrets FILE` - Path to secrets file (default: `secrets.txt`)
 - `--log-file FILE` - Path to log file (default: `logs/absorb_sync_YYYYMMDD_HHMMSS.log`)
 - `--csv-file FILE` - Path to CSV file for user data (default: `users_YYYYMMDD_HHMMSS.csv`)
-- `--customField FIELD` - Target custom field name (default: `decimal1`). Specify only the field name without the `customFields` prefix. Examples: `decimal1`, `decimal2`, `string1`, `string2`, `date1`, `checkbox1`
+- `--customField FIELD` - Target custom field name (default: `decimal1`). Specify only the field name without the `customFields` prefix. Examples: `decimal1`, `decimal2`, `string1`, `string2`, `date1`, `checkbox1`. The script validates that field names match the standard Absorb LMS pattern (e.g., `decimal1`, `string1`) and warns if an unusual field name is provided. Users should verify the field exists in their Absorb LMS instance before running.
 
 #### Processing Mode Options
 - `--update` - Actually perform updates (default is dry-run mode)
@@ -300,9 +300,14 @@ users_20260219_123456.csv
 - **id** - User UUID
 - **username** - Username
 - **externalId** - External ID value
-- **current_decimal1** - Current value of the target custom field
-  - **Note:** The CSV column name is always `current_decimal1` for backward compatibility, regardless of which custom field is being synced. This is a design decision to maintain compatibility with existing scripts and tools that process these CSV files. When syncing to fields other than `decimal1`, be aware that this column will contain values from your target field (e.g., `string1`, `decimal2`, etc.).
+- **current_decimal1** - Current value of the target custom field (see note below)
 - **user_data_json** - Complete user profile as JSON (needed for PUT updates)
+
+#### CSV Column Naming Note
+
+The CSV column name is always `current_decimal1` for backward compatibility, regardless of which custom field is being synced. This is an intentional design decision to maintain compatibility with existing scripts and tools that process these CSV files.
+
+**Important:** When using `--customField` to sync to a field other than `decimal1` (e.g., `string1`, `decimal2`), the `current_decimal1` column will contain values from your target field, not from `decimal1`. Be aware of this when processing the CSV file programmatically.
 
 ### Incremental Updates
 
