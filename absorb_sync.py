@@ -677,62 +677,114 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(
-        description='Sync external IDs from External ID field to Ext_ID field in Absorb LMS'
+        description='Absorb LMS External ID Sync - Synchronize externalId values to customFields.decimal1',
+        epilog='''
+Examples:
+  # Dry-run mode (default - preview changes without modifying data)
+  python absorb_sync.py
+  
+  # Actually perform updates (requires --update flag)
+  python absorb_sync.py --update
+  
+  # Filter by department
+  python absorb_sync.py --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
+  
+  # Only update users with blank decimal1 field
+  python absorb_sync.py --blank --update
+  
+  # Update all users, even if decimal1 already has a different value
+  python absorb_sync.py --overwrite --update
+  
+  # Allow alphanumeric externalIds (default: numeric only)
+  python absorb_sync.py --alpha --update
+  
+  # Process existing CSV file instead of downloading
+  python absorb_sync.py --file users_20260219_123456.csv --update
+  
+  # Combine multiple filters
+  python absorb_sync.py --blank --department <dept-id> --alpha --update
+  
+  # Debug mode (prints sensitive data including API keys)
+  python absorb_sync.py --debug --dry-run
+
+For more information, see README.md or visit https://github.com/clc2salesforce/AbsorbSync
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
+    
+    # Configuration options
+    config_group = parser.add_argument_group('Configuration Options')
+    config_group.add_argument(
         '--secrets',
         default='secrets.txt',
-        help='Path to secrets file (default: secrets.txt)'
+        metavar='FILE',
+        help='Path to secrets file containing API credentials (default: secrets.txt)'
     )
-    parser.add_argument(
+    config_group.add_argument(
         '--log-file',
         default=None,
+        metavar='FILE',
         help='Path to log file (default: logs/absorb_sync_YYYYMMDD_HHMMSS.log)'
     )
-    parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Run in dry-run mode (no changes will be made)'
-    )
-    parser.add_argument(
-        '--debug',
-        action='store_true',
-        help='Enable debug mode (prints sensitive data including API keys)'
-    )
-    parser.add_argument(
+    config_group.add_argument(
         '--csv-file',
         default=None,
+        metavar='FILE',
         help='Path to CSV file for storing user data (default: users_YYYYMMDD_HHMMSS.csv)'
     )
-    parser.add_argument(
-        '--blank',
-        action='store_true',
-        help='Filter only users that have a null/empty value for decimal1 field'
-    )
-    parser.add_argument(
-        '--overwrite',
-        action='store_true',
-        help='Update customFields.decimal1 even if it already has a value'
-    )
-    parser.add_argument(
+    
+    # Processing mode options
+    mode_group = parser.add_argument_group('Processing Mode Options')
+    mode_group.add_argument(
         '--update',
         action='store_true',
-        help='Actually perform updates (default is dry-run mode unless --update is specified)'
+        help='Actually perform updates to Absorb LMS (default is dry-run mode)'
     )
-    parser.add_argument(
+    mode_group.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Explicitly enable dry-run mode (no changes will be made). This is the default behavior.'
+    )
+    mode_group.add_argument(
         '--file',
         default=None,
-        help='Path to existing CSV file to process (skips download phase)'
+        metavar='FILE',
+        help='Process existing CSV file instead of downloading from API (skips download phase)'
     )
-    parser.add_argument(
+    
+    # Filtering options
+    filter_group = parser.add_argument_group('Filtering Options')
+    filter_group.add_argument(
+        '--blank',
+        action='store_true',
+        help='Filter to only users with null/empty decimal1 field (uses OData filter)'
+    )
+    filter_group.add_argument(
         '--department',
         default=None,
-        help='Filter by departmentId (e.g., c458459d-2f86-4c66-a481-e17e6983f7ee)'
+        metavar='DEPT_ID',
+        help='Filter by departmentId UUID (e.g., c458459d-2f86-4c66-a481-e17e6983f7ee)'
     )
-    parser.add_argument(
+    
+    # Validation and behavior options
+    behavior_group = parser.add_argument_group('Validation and Behavior Options')
+    behavior_group.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Update decimal1 even if it already has a different value (default: skip and mark as "Different")'
+    )
+    behavior_group.add_argument(
         '--alpha',
         action='store_true',
-        help='Allow alphanumeric externalIds (default: numeric only)'
+        help='Allow alphanumeric externalIds (default: numeric only, non-numeric marked as "Wrong Format")'
+    )
+    
+    # Debug options
+    debug_group = parser.add_argument_group('Debug Options')
+    debug_group.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode (prints sensitive data including API keys and credentials - USE ONLY IN SANDBOX)'
     )
     
     args = parser.parse_args()
