@@ -371,7 +371,7 @@ class AbsorbLMSClient:
                 json=user_data
             )
             
-            if response.status_code in [200, 204]:
+            if response.status_code in [200, 201, 204]:
                 return True
             else:
                 logging.error(
