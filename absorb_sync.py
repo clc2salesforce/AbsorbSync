@@ -705,8 +705,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     
     # Read CSV, process each user, and update CSV incrementally
     # To ensure incremental updates visible to the user and fault tolerance,
-    # we read all rows into memory, process each one, and rewrite the CSV after each update.
-    # This ensures that if the script crashes, the CSV shows progress up to the last processed user.
+    # we read all rows into memory, process each one, and rewrite the CSV after each status change.
+    # This ensures that if the script crashes, the CSV shows progress up to the last completed user.
     
     # Read all rows from CSV into memory
     logging.info(f"Reading CSV file: {csv_file}")
@@ -736,10 +736,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 logging.error(f"Failed to parse user data for {username}: {e}")
                 if row['Status'] != 'Failure':  # Only write if status changed
                     row['Status'] = 'Failure'
-                    error_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
-                else:
-                    error_count += 1
+                error_count += 1  # Always count the error
                 continue
             
             # Check if source value is blank but destination field is set
@@ -747,10 +745,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}")
                 if row['Status'] != 'Different':  # Only write if status changed
                     row['Status'] = 'Different'
-                    skip_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
-                else:
-                    skip_count += 1
+                skip_count += 1  # Always count the skip
                 continue
             
             # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
@@ -762,10 +758,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)")
                 if row['Status'] != 'Wrong Format':  # Only write if status changed
                     row['Status'] = 'Wrong Format'
-                    skip_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
-                else:
-                    skip_count += 1
+                skip_count += 1  # Always count the skip
                 continue
             
             # Check if we should skip this user based on overwrite flag
@@ -779,10 +773,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)")
                 if row['Status'] != 'Different':  # Only write if status changed
                     row['Status'] = 'Different'
-                    skip_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
-                else:
-                    skip_count += 1
+                skip_count += 1  # Always count the skip
                 continue
             
             logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
