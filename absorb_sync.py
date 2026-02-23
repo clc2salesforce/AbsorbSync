@@ -174,7 +174,8 @@ class AbsorbLMSClient:
                 logging.info(f"DEBUG: Params: {kwargs['params']}")
             logging.info("="*60)
         
-        for attempt in range(max_retries):
+        attempt = 0
+        while attempt < max_retries:
             try:
                 response = self.session.request(method, url, **kwargs)
                 
@@ -189,8 +190,12 @@ class AbsorbLMSClient:
                 
                 # Handle 401 Unauthorized - token may have expired
                 if response.status_code == 401:
+                    # Check if this is the authenticate endpoint by comparing with the auth URL
+                    auth_url = f"{self.api_url}/authenticate"
+                    is_auth_endpoint = url.rstrip('/') == auth_url.rstrip('/')
+                    
                     # Skip reauthentication if this is the authenticate endpoint itself
-                    if '/authenticate' not in url and reauth_attempts < max_reauth_attempts:
+                    if not is_auth_endpoint and reauth_attempts < max_reauth_attempts:
                         reauth_attempts += 1
                         logging.warning(
                             f"Received 401 Unauthorized. Attempting reauthentication "
@@ -198,7 +203,7 @@ class AbsorbLMSClient:
                         )
                         if self.authenticate():
                             logging.info("Reauthentication successful. Retrying original request...")
-                            # Don't increment attempt counter for reauthentication
+                            # Continue without incrementing attempt counter
                             continue
                         else:
                             logging.error("Reauthentication failed")
@@ -216,6 +221,7 @@ class AbsorbLMSClient:
                         )
                         time.sleep(delay)
                         delay *= 2  # Exponential backoff
+                        attempt += 1
                         continue
                     else:
                         # Last attempt failed with retryable status code
@@ -236,6 +242,7 @@ class AbsorbLMSClient:
                     )
                     time.sleep(delay)
                     delay *= 2  # Exponential backoff
+                    attempt += 1
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
