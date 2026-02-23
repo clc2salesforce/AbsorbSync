@@ -693,8 +693,17 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         temp_csv = temp_file.name
     
     try:
-        with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
-             open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
+        # Move original CSV to temp for reading; write updates directly to original.
+        # This ensures the status column in the CSV is updated after each API call,
+        # not once after all updates complete.
+        if not dry_run:
+            os.replace(csv_file, temp_csv)
+        
+        read_path = temp_csv if not dry_run else csv_file
+        write_path = csv_file if not dry_run else temp_csv
+        
+        with open(read_path, 'r', newline='', encoding='utf-8') as f_in, \
+             open(write_path, 'w', newline='', encoding='utf-8') as f_out:
             
             reader = csv.DictReader(f_in)
             fieldnames = reader.fieldnames
@@ -772,20 +781,20 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 writer.writerow(row)
                 f_out.flush()  # Flush after each row to ensure it's written to disk
         
-        # Files are now closed, safe to replace or remove
-        # Replace original CSV with updated one
+        # Files are now closed, safe to clean up
+        # In non-dry-run mode, updates were written directly to csv_file
+        # In dry-run mode, updates were written to temp_csv (original unchanged)
+        if os.path.exists(temp_csv):
+            os.remove(temp_csv)
         if not dry_run:
-            os.replace(temp_csv, csv_file)
             logging.info(f"Updated CSV saved to {csv_file}")
-        else:
-            # In dry-run, remove temp file
-            if os.path.exists(temp_csv):
-                os.remove(temp_csv)
     
     except Exception as e:
         logging.error(f"Error during processing: {e}")
-        # Clean up temp file on error (files are closed due to exception)
-        if temp_csv and os.path.exists(temp_csv):
+        if not dry_run and temp_csv and os.path.exists(temp_csv):
+            # In non-dry-run mode, temp file contains original data as backup
+            logging.warning(f"Original data preserved in temporary file: {temp_csv}")
+        elif temp_csv and os.path.exists(temp_csv):
             try:
                 os.remove(temp_csv)
             except OSError as cleanup_error:
