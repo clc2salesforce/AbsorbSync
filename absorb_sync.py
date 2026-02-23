@@ -699,14 +699,12 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     
     # Process the CSV file and update incrementally
     logging.info("\nProcessing users...")
-    success_count = 0
-    error_count = 0
-    skip_count = 0  # Initialize as local variable
     
     # Read CSV, process each user, and update CSV incrementally
     # To ensure incremental updates visible to the user and fault tolerance,
     # we read all rows into memory, process each one, and rewrite the CSV after each status change.
     # This ensures that if the script crashes, the CSV shows progress up to the last completed user.
+    # Note: All rows are loaded into memory. For very large files (10k+ rows), this may impact memory usage and rewrite performance.
     
     # Read all rows from CSV into memory
     logging.info(f"Reading CSV file: {csv_file}")
@@ -734,18 +732,16 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 user_data = json.loads(user_data_json)
             except json.JSONDecodeError as e:
                 logging.error(f"Failed to parse user data for {username}: {e}")
-                if row['Status'] != 'Failure':  # Only count and write if status changed
+                if row['Status'] != 'Failure':  # Only write if status changed
                     row['Status'] = 'Failure'
-                    error_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
                 continue
             
             # Check if source value is blank but destination field is set
             if not source_value and current_field_value:
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}")
-                if row['Status'] != 'Different':  # Only count and write if status changed
+                if row['Status'] != 'Different':  # Only write if status changed
                     row['Status'] = 'Different'
-                    skip_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
                 continue
             
@@ -756,9 +752,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             # Validate source value format if not allowing alphanumeric
             if not allow_alpha and not is_numeric_only(source_value):
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)")
-                if row['Status'] != 'Wrong Format':  # Only count and write if status changed
+                if row['Status'] != 'Wrong Format':  # Only write if status changed
                     row['Status'] = 'Wrong Format'
-                    skip_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
                 continue
             
@@ -771,9 +766,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             # Skip if values don't match and overwrite is False
             if not overwrite and current_field_int is not None and current_field_int != source_value_int:
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)")
-                if row['Status'] != 'Different':  # Only count and write if status changed
+                if row['Status'] != 'Different':  # Only write if status changed
                     row['Status'] = 'Different'
-                    skip_count += 1
                     write_csv_atomically(csv_file, fieldnames, rows)
                 continue
             
@@ -786,21 +780,15 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
                 row['Status'] = 'Success'
                 status_changed = (old_status != 'Success')
-                if status_changed:
-                    success_count += 1
             else:
                 if client.update_user(user_data, source_value, destination_field):
                     logging.info(f"Successfully updated user {username}")
                     row['Status'] = 'Success'
                     status_changed = (old_status != 'Success')
-                    if status_changed:
-                        success_count += 1
                 else:
                     logging.error(f"Failed to update user {username}")
                     row['Status'] = 'Failure'
                     status_changed = (old_status != 'Failure')
-                    if status_changed:
-                        error_count += 1
             
             # Write updated CSV only if status actually changed
             if status_changed:
