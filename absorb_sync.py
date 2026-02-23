@@ -763,10 +763,12 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     if client.update_user(user_data, source_value, destination_field):
                         logging.info(f"Successfully updated user {username}")
                         row['Status'] = 'Success'
+                        logging.info(f"Set status to 'Success' for user {username} in CSV")
                         success_count += 1
                     else:
                         logging.error(f"Failed to update user {username}")
                         row['Status'] = 'Failure'
+                        logging.info(f"Set status to 'Failure' for user {username} in CSV")
                         error_count += 1
                 
                 writer.writerow(row)
@@ -775,8 +777,32 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         # Files are now closed, safe to replace or remove
         # Replace original CSV with updated one
         if not dry_run:
-            os.replace(temp_csv, csv_file)
-            logging.info(f"Updated CSV saved to {csv_file}")
+            logging.info(f"Replacing {csv_file} with updated version from {temp_csv}")
+            try:
+                os.replace(temp_csv, csv_file)
+                logging.info(f"Successfully replaced CSV file: {csv_file}")
+                
+                # Verify the replacement was successful
+                if os.path.exists(csv_file):
+                    logging.info(f"Verified: Updated CSV file exists at {csv_file}")
+                else:
+                    logging.error(f"ERROR: CSV file not found after replacement: {csv_file}")
+                    raise FileNotFoundError(f"CSV file not found after replacement: {csv_file}")
+                    
+                # Verify temp file was consumed by os.replace
+                if os.path.exists(temp_csv):
+                    logging.warning(f"WARNING: Temporary file still exists after replacement: {temp_csv}")
+                    # Clean up lingering temp file
+                    try:
+                        os.remove(temp_csv)
+                        logging.info(f"Removed lingering temporary file: {temp_csv}")
+                    except OSError as e:
+                        logging.warning(f"Could not remove temporary file {temp_csv}: {e}")
+                else:
+                    logging.info(f"Verified: Temporary file was removed: {temp_csv}")
+            except OSError as e:
+                logging.error(f"ERROR: Failed to replace CSV file: {e}")
+                raise
         else:
             # In dry-run, remove temp file
             if os.path.exists(temp_csv):
