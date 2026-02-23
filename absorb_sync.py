@@ -779,26 +779,28 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             
             logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
             
-            # Track if status changed to decide whether to write CSV
-            status_changed = False
+            # Track if status changed to decide whether to write CSV and increment counts
             old_status = row['Status']
             
             if dry_run:
                 logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
                 row['Status'] = 'Success'
-                success_count += 1
                 status_changed = (old_status != 'Success')
+                if status_changed:
+                    success_count += 1
             else:
                 if client.update_user(user_data, source_value, destination_field):
                     logging.info(f"Successfully updated user {username}")
                     row['Status'] = 'Success'
-                    success_count += 1
                     status_changed = (old_status != 'Success')
+                    if status_changed:
+                        success_count += 1
                 else:
                     logging.error(f"Failed to update user {username}")
                     row['Status'] = 'Failure'
-                    error_count += 1
                     status_changed = (old_status != 'Failure')
+                    if status_changed:
+                        error_count += 1
             
             # Write updated CSV only if status actually changed
             if status_changed:
