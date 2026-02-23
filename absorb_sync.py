@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -670,140 +669,107 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             logging.info("\nUpdate cancelled by user")
             return 0, 0, 0
     
-    # Process the CSV file and update incrementally
+    # Process the CSV file and update in-place
     logging.info("\nProcessing users...")
     success_count = 0
     error_count = 0
-    skip_count = 0  # Initialize as local variable
+    skip_count = 0
     
-    # Helper function to skip a user and write to CSV
-    def skip_user(row, status, message, writer, f_out):
-        """Skip a user, update status, log, and write to CSV."""
-        nonlocal skip_count
-        logging.info(message)
-        row['Status'] = status
-        skip_count += 1
-        writer.writerow(row)
-        f_out.flush()
+    # Read all rows into memory so the CSV always contains all records.
+    # After each status update, the entire CSV is rewritten. If the process
+    # crashes, every row remains in the file and the run can be resumed
+    # with --file since already-processed rows are skipped.
+    with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
     
-    # Read CSV, process each user, and update CSV incrementally
-    temp_csv = None
-    temp_dir = os.path.dirname(csv_file) or '.'
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, suffix='.tmp', newline='', encoding='utf-8') as temp_file:
-        temp_csv = temp_file.name
+    # Get the destination field column name from CSV
+    dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
     
-    try:
-        # Move original CSV to temp for reading; write updates directly to original.
-        # This ensures the status column in the CSV is updated after each API call,
-        # not once after all updates complete.
-        if not dry_run:
-            os.replace(csv_file, temp_csv)
-        
-        read_path = temp_csv if not dry_run else csv_file
-        write_path = csv_file if not dry_run else temp_csv
-        
-        with open(read_path, 'r', newline='', encoding='utf-8') as f_in, \
-             open(write_path, 'w', newline='', encoding='utf-8') as f_out:
-            
-            reader = csv.DictReader(f_in)
-            fieldnames = reader.fieldnames
-            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+    def _save_csv():
+        """Rewrite the CSV file with all rows from memory."""
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            
-            # Get the destination field column name from CSV
-            dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
-            
-            for row in reader:
-                user_id = row['id']
-                username = row['username']
-                source_value = row[source_field]
-                # Get current destination field value using dynamic column name
-                current_field_value = row.get(dest_col_name, '')
-                user_data_json = row['user_data_json']
-                
-                try:
-                    user_data = json.loads(user_data_json)
-                except json.JSONDecodeError as e:
-                    logging.error(f"Failed to parse user data for {username}: {e}")
-                    row['Status'] = 'Failure'
-                    error_count += 1
-                    writer.writerow(row)
-                    f_out.flush()  # Flush after each row
-                    continue
-                
-                # Check if source value is blank but destination field is set
-                if not source_value and current_field_value:
-                    skip_user(row, 'Different', 
-                             f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}",
-                             writer, f_out)
-                    continue
-                
-                # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
-                if not source_value:
-                    continue
-                
-                # Validate source value format if not allowing alphanumeric
-                if not allow_alpha and not is_numeric_only(source_value):
-                    skip_user(row, 'Wrong Format',
-                             f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)",
-                             writer, f_out)
-                    continue
-                
-                # Check if we should skip this user based on overwrite flag
-                # For decimal fields, remove decimals for comparison (source value may be a whole number)
-                # For string fields, compare directly
-                current_field_int = parse_int_from_string(current_field_value)
-                source_value_int = parse_int_from_string(source_value)
-                
-                # Skip if values don't match and overwrite is False
-                if not overwrite and current_field_int is not None and current_field_int != source_value_int:
-                    skip_user(row, 'Different',
-                             f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)",
-                             writer, f_out)
-                    continue
-                
-                logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
-                
-                if dry_run:
-                    logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
-                    row['Status'] = 'Success'
-                    success_count += 1
-                else:
-                    if client.update_user(user_data, source_value, destination_field):
-                        logging.info(f"Successfully updated user {username}")
-                        row['Status'] = 'Success'
-                        success_count += 1
-                    else:
-                        logging.error(f"Failed to update user {username}")
-                        row['Status'] = 'Failure'
-                        error_count += 1
-                
-                writer.writerow(row)
-                f_out.flush()  # Flush after each row to ensure it's written to disk
-        
-        # Files are now closed, safe to clean up
-        if not dry_run:
-            # Non-dry-run: updates were written directly to csv_file;
-            # temp_csv was the backup of the original data
-            if os.path.exists(temp_csv):
-                os.remove(temp_csv)
-            logging.info(f"Updated CSV saved to {csv_file}")
-        else:
-            # Dry-run: updates were written to temp_csv; original unchanged
-            if os.path.exists(temp_csv):
-                os.remove(temp_csv)
+            writer.writerows(rows)
     
-    except Exception as e:
-        logging.error(f"Error during processing: {e}")
-        if not dry_run and temp_csv and os.path.exists(temp_csv):
-            # In non-dry-run mode, temp file contains original data as backup
-            logging.warning(f"Original data preserved in temporary file: {temp_csv}")
-        elif temp_csv and os.path.exists(temp_csv):
-            try:
-                os.remove(temp_csv)
-            except OSError as cleanup_error:
-                logging.warning(f"Could not remove temporary file {temp_csv}: {cleanup_error}")
-        raise
+    # Final status values that indicate a row was already processed
+    final_statuses = {'Success', 'Failure', 'Different', 'Wrong Format'}
+    
+    for row in rows:
+        user_id = row['id']
+        username = row['username']
+        status = row['Status']
+        
+        # Skip rows that were already processed (enables resumability with --file)
+        if status in final_statuses:
+            logging.info(f"Skipping already-processed user {username} (ID: {user_id}) - Status: {status}")
+            continue
+        
+        source_value = row[source_field]
+        current_field_value = row.get(dest_col_name, '')
+        user_data_json = row['user_data_json']
+        
+        try:
+            user_data = json.loads(user_data_json)
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse user data for {username}: {e}")
+            row['Status'] = 'Failure'
+            error_count += 1
+            _save_csv()
+            continue
+        
+        # Check if source value is blank but destination field is set
+        if not source_value and current_field_value:
+            logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}")
+            row['Status'] = 'Different'
+            skip_count += 1
+            _save_csv()
+            continue
+        
+        # Skip users with blank source value (and blank destination field)
+        if not source_value:
+            continue
+        
+        # Validate source value format if not allowing alphanumeric
+        if not allow_alpha and not is_numeric_only(source_value):
+            logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)")
+            row['Status'] = 'Wrong Format'
+            skip_count += 1
+            _save_csv()
+            continue
+        
+        # Check if we should skip this user based on overwrite flag
+        current_field_int = parse_int_from_string(current_field_value)
+        source_value_int = parse_int_from_string(source_value)
+        
+        if not overwrite and current_field_int is not None and current_field_int != source_value_int:
+            logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)")
+            row['Status'] = 'Different'
+            skip_count += 1
+            _save_csv()
+            continue
+        
+        logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
+        
+        if dry_run:
+            logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
+            row['Status'] = 'Success'
+            success_count += 1
+        else:
+            if client.update_user(user_data, source_value, destination_field):
+                logging.info(f"Successfully updated user {username}")
+                row['Status'] = 'Success'
+                success_count += 1
+            else:
+                logging.error(f"Failed to update user {username}")
+                row['Status'] = 'Failure'
+                error_count += 1
+        
+        _save_csv()
+    
+    logging.info(f"Updated CSV saved to {csv_file}")
     
     logging.info(f"\n{'='*60}")
     logging.info(f"Sync completed!")
