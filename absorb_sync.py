@@ -175,7 +175,7 @@ class AbsorbLMSClient:
             logging.info("="*60)
         
         attempt = 0
-        while attempt < max_retries:
+        while True:
             try:
                 response = self.session.request(method, url, **kwargs)
                 
@@ -215,13 +215,13 @@ class AbsorbLMSClient:
                 # If we get a rate limit or server error, retry
                 if response.status_code in [429, 500, 502, 503, 504]:
                     if attempt < max_retries - 1:
+                        attempt += 1
                         logging.warning(
-                            f"Retry {attempt + 1}/{max_retries} for {method} {url} "
+                            f"Retry {attempt}/{max_retries} for {method} {url} "
                             f"(status: {response.status_code})"
                         )
                         time.sleep(delay)
                         delay *= 2  # Exponential backoff
-                        attempt += 1
                         continue
                     else:
                         # Last attempt failed with retryable status code
@@ -229,6 +229,7 @@ class AbsorbLMSClient:
                             f"Max retries exceeded. Last status: {response.status_code}"
                         )
                 
+                # For successful or non-retryable responses, return immediately
                 return response
                 
             except requests.exceptions.RequestException as e:
@@ -236,13 +237,13 @@ class AbsorbLMSClient:
                 if self.debug:
                     logging.info(f"DEBUG: Request Exception: {last_error}")
                 if attempt < max_retries - 1:
+                    attempt += 1
                     logging.warning(
-                        f"Retry {attempt + 1}/{max_retries} for {method} {url} "
+                        f"Retry {attempt}/{max_retries} for {method} {url} "
                         f"(error: {last_error})"
                     )
                     time.sleep(delay)
                     delay *= 2  # Exponential backoff
-                    attempt += 1
                 else:
                     raise Exception(f"Max retries exceeded: {last_error}")
             
