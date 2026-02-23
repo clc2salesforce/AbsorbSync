@@ -127,15 +127,16 @@ class AbsorbLMSClient:
             return False
     
     def _retry_request(self, method: str, url: str, max_retries: int = 5, 
-                      initial_delay: float = 1.0, **kwargs) -> requests.Response:
+                      initial_delay: float = 1.0, max_reauth_attempts: int = 1, **kwargs) -> requests.Response:
         """
-        Make an HTTP request with exponential backoff retry logic.
+        Make an HTTP request with exponential backoff retry logic and automatic reauthentication.
         
         Args:
             method: HTTP method (GET, POST, PUT, etc.)
             url: URL to request
             max_retries: Maximum number of retry attempts
             initial_delay: Initial delay in seconds before first retry
+            max_reauth_attempts: Maximum number of reauthentication attempts on 401 errors (default: 1)
             **kwargs: Additional arguments to pass to requests
             
         Returns:
@@ -147,6 +148,7 @@ class AbsorbLMSClient:
         """
         delay = initial_delay
         last_error = None
+        reauth_attempts = 0
         
         # Debug logging for the request
         if self.debug:
@@ -184,6 +186,26 @@ class AbsorbLMSClient:
                     logging.info(f"DEBUG: Response Headers: {dict(response.headers)}")
                     logging.info(f"DEBUG: Response Body: {response.text[:500]}...")  # First 500 chars
                     logging.info("="*60)
+                
+                # Handle 401 Unauthorized - token may have expired
+                if response.status_code == 401:
+                    # Skip reauthentication if this is the authenticate endpoint itself
+                    if '/authenticate' not in url and reauth_attempts < max_reauth_attempts:
+                        reauth_attempts += 1
+                        logging.warning(
+                            f"Received 401 Unauthorized. Attempting reauthentication "
+                            f"({reauth_attempts}/{max_reauth_attempts})..."
+                        )
+                        if self.authenticate():
+                            logging.info("Reauthentication successful. Retrying original request...")
+                            # Don't increment attempt counter for reauthentication
+                            continue
+                        else:
+                            logging.error("Reauthentication failed")
+                            return response
+                    else:
+                        # Either this is the auth endpoint, or we've exhausted reauth attempts
+                        return response
                 
                 # If we get a rate limit or server error, retry
                 if response.status_code in [429, 500, 502, 503, 504]:
