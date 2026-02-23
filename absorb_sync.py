@@ -601,7 +601,6 @@ def write_csv_atomically(csv_file: str, fieldnames: list, rows: list):
         fieldnames: List of field names for the CSV header
         rows: List of dictionaries representing CSV rows
     """
-    import tempfile
     temp_dir = os.path.dirname(csv_file) or '.'
     
     # Create temp file in the same directory as the target file
@@ -735,19 +734,23 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 user_data = json.loads(user_data_json)
             except json.JSONDecodeError as e:
                 logging.error(f"Failed to parse user data for {username}: {e}")
-                row['Status'] = 'Failure'
-                error_count += 1
-                # Write updated CSV after each status change
-                write_csv_atomically(csv_file, fieldnames, rows)
+                if row['Status'] != 'Failure':  # Only write if status changed
+                    row['Status'] = 'Failure'
+                    error_count += 1
+                    write_csv_atomically(csv_file, fieldnames, rows)
+                else:
+                    error_count += 1
                 continue
             
             # Check if source value is blank but destination field is set
             if not source_value and current_field_value:
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}")
-                row['Status'] = 'Different'
-                skip_count += 1
-                # Write updated CSV after each status change
-                write_csv_atomically(csv_file, fieldnames, rows)
+                if row['Status'] != 'Different':  # Only write if status changed
+                    row['Status'] = 'Different'
+                    skip_count += 1
+                    write_csv_atomically(csv_file, fieldnames, rows)
+                else:
+                    skip_count += 1
                 continue
             
             # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
@@ -757,10 +760,12 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             # Validate source value format if not allowing alphanumeric
             if not allow_alpha and not is_numeric_only(source_value):
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)")
-                row['Status'] = 'Wrong Format'
-                skip_count += 1
-                # Write updated CSV after each status change
-                write_csv_atomically(csv_file, fieldnames, rows)
+                if row['Status'] != 'Wrong Format':  # Only write if status changed
+                    row['Status'] = 'Wrong Format'
+                    skip_count += 1
+                    write_csv_atomically(csv_file, fieldnames, rows)
+                else:
+                    skip_count += 1
                 continue
             
             # Check if we should skip this user based on overwrite flag
@@ -772,32 +777,40 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             # Skip if values don't match and overwrite is False
             if not overwrite and current_field_int is not None and current_field_int != source_value_int:
                 logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)")
-                row['Status'] = 'Different'
-                skip_count += 1
-                # Write updated CSV after each status change
-                write_csv_atomically(csv_file, fieldnames, rows)
+                if row['Status'] != 'Different':  # Only write if status changed
+                    row['Status'] = 'Different'
+                    skip_count += 1
+                    write_csv_atomically(csv_file, fieldnames, rows)
+                else:
+                    skip_count += 1
                 continue
             
             logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
+            
+            # Track if status changed to decide whether to write CSV
+            status_changed = False
+            old_status = row['Status']
             
             if dry_run:
                 logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
                 row['Status'] = 'Success'
                 success_count += 1
+                status_changed = (old_status != 'Success')
             else:
                 if client.update_user(user_data, source_value, destination_field):
                     logging.info(f"Successfully updated user {username}")
                     row['Status'] = 'Success'
-                    logging.info(f"Set status to 'Success' for user {username} in CSV")
                     success_count += 1
+                    status_changed = (old_status != 'Success')
                 else:
                     logging.error(f"Failed to update user {username}")
                     row['Status'] = 'Failure'
-                    logging.info(f"Set status to 'Failure' for user {username} in CSV")
                     error_count += 1
+                    status_changed = (old_status != 'Failure')
             
-            # Write updated CSV after each successful update to ensure incremental progress
-            write_csv_atomically(csv_file, fieldnames, rows)
+            # Write updated CSV only if status actually changed
+            if status_changed:
+                write_csv_atomically(csv_file, fieldnames, rows)
     
     except Exception as e:
         logging.error(f"Error during processing: {e}")
