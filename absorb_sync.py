@@ -591,6 +591,34 @@ def is_numeric_only(value: str) -> bool:
     return value.isdigit()
 
 
+def write_csv_atomically(csv_file: str, fieldnames: list, rows: list):
+    """
+    Write CSV file atomically using a temp file and os.replace.
+    This ensures that the CSV is never left in a partially written state.
+    
+    Args:
+        csv_file: Path to the CSV file to write
+        fieldnames: List of field names for the CSV header
+        rows: List of dictionaries representing CSV rows
+    """
+    import tempfile
+    temp_dir = os.path.dirname(csv_file) or '.'
+    
+    # Create temp file in the same directory as the target file
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, 
+                                      suffix='.tmp', newline='', encoding='utf-8') as temp_file:
+        temp_csv = temp_file.name
+        writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())  # Ensure data is written to disk
+    
+    # Atomically replace the original file with the temp file
+    os.replace(temp_csv, csv_file)
+
+
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
                       use_existing_file: bool = False, allow_alpha: bool = False,
@@ -676,146 +704,108 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     error_count = 0
     skip_count = 0  # Initialize as local variable
     
-    # Helper function to skip a user and write to CSV
-    def skip_user(row, status, message, writer, f_out):
-        """Skip a user, update status, log, and write to CSV."""
-        nonlocal skip_count
-        logging.info(message)
-        row['Status'] = status
-        skip_count += 1
-        writer.writerow(row)
-        f_out.flush()
-    
     # Read CSV, process each user, and update CSV incrementally
-    temp_csv = None
-    temp_dir = os.path.dirname(csv_file) or '.'
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, suffix='.tmp', newline='', encoding='utf-8') as temp_file:
-        temp_csv = temp_file.name
+    # To ensure incremental updates visible to the user and fault tolerance,
+    # we read all rows into memory, process each one, and rewrite the CSV after each update.
+    # This ensures that if the script crashes, the CSV shows progress up to the last processed user.
     
+    # Read all rows from CSV into memory
+    logging.info(f"Reading CSV file: {csv_file}")
+    with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    
+    logging.info(f"Loaded {len(rows)} rows from CSV")
+    
+    # Get the destination field column name from CSV
+    dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
+    
+    # Process each row and update CSV incrementally
     try:
-        with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
-             open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
+        for row_index, row in enumerate(rows):
+            user_id = row['id']
+            username = row['username']
+            source_value = row[source_field]
+            # Get current destination field value using dynamic column name
+            current_field_value = row.get(dest_col_name, '')
+            user_data_json = row['user_data_json']
             
-            reader = csv.DictReader(f_in)
-            fieldnames = reader.fieldnames
-            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
-            writer.writeheader()
+            try:
+                user_data = json.loads(user_data_json)
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to parse user data for {username}: {e}")
+                row['Status'] = 'Failure'
+                error_count += 1
+                # Write updated CSV after each status change
+                write_csv_atomically(csv_file, fieldnames, rows)
+                continue
             
-            # Get the destination field column name from CSV
-            dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
+            # Check if source value is blank but destination field is set
+            if not source_value and current_field_value:
+                logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}")
+                row['Status'] = 'Different'
+                skip_count += 1
+                # Write updated CSV after each status change
+                write_csv_atomically(csv_file, fieldnames, rows)
+                continue
             
-            for row in reader:
-                user_id = row['id']
-                username = row['username']
-                source_value = row[source_field]
-                # Get current destination field value using dynamic column name
-                current_field_value = row.get(dest_col_name, '')
-                user_data_json = row['user_data_json']
-                
-                try:
-                    user_data = json.loads(user_data_json)
-                except json.JSONDecodeError as e:
-                    logging.error(f"Failed to parse user data for {username}: {e}")
-                    row['Status'] = 'Failure'
-                    error_count += 1
-                    writer.writerow(row)
-                    f_out.flush()  # Flush after each row
-                    continue
-                
-                # Check if source value is blank but destination field is set
-                if not source_value and current_field_value:
-                    skip_user(row, 'Different', 
-                             f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}",
-                             writer, f_out)
-                    continue
-                
-                # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
-                if not source_value:
-                    continue
-                
-                # Validate source value format if not allowing alphanumeric
-                if not allow_alpha and not is_numeric_only(source_value):
-                    skip_user(row, 'Wrong Format',
-                             f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)",
-                             writer, f_out)
-                    continue
-                
-                # Check if we should skip this user based on overwrite flag
-                # For decimal fields, remove decimals for comparison (source value may be a whole number)
-                # For string fields, compare directly
-                current_field_int = parse_int_from_string(current_field_value)
-                source_value_int = parse_int_from_string(source_value)
-                
-                # Skip if values don't match and overwrite is False
-                if not overwrite and current_field_int is not None and current_field_int != source_value_int:
-                    skip_user(row, 'Different',
-                             f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)",
-                             writer, f_out)
-                    continue
-                
-                logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
-                
-                if dry_run:
-                    logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
+            # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
+            if not source_value:
+                continue
+            
+            # Validate source value format if not allowing alphanumeric
+            if not allow_alpha and not is_numeric_only(source_value):
+                logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)")
+                row['Status'] = 'Wrong Format'
+                skip_count += 1
+                # Write updated CSV after each status change
+                write_csv_atomically(csv_file, fieldnames, rows)
+                continue
+            
+            # Check if we should skip this user based on overwrite flag
+            # For decimal fields, remove decimals for comparison (source value may be a whole number)
+            # For string fields, compare directly
+            current_field_int = parse_int_from_string(current_field_value)
+            source_value_int = parse_int_from_string(source_value)
+            
+            # Skip if values don't match and overwrite is False
+            if not overwrite and current_field_int is not None and current_field_int != source_value_int:
+                logging.info(f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)")
+                row['Status'] = 'Different'
+                skip_count += 1
+                # Write updated CSV after each status change
+                write_csv_atomically(csv_file, fieldnames, rows)
+                continue
+            
+            logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
+            
+            if dry_run:
+                logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
+                row['Status'] = 'Success'
+                success_count += 1
+            else:
+                if client.update_user(user_data, source_value, destination_field):
+                    logging.info(f"Successfully updated user {username}")
                     row['Status'] = 'Success'
+                    logging.info(f"Set status to 'Success' for user {username} in CSV")
                     success_count += 1
                 else:
-                    if client.update_user(user_data, source_value, destination_field):
-                        logging.info(f"Successfully updated user {username}")
-                        row['Status'] = 'Success'
-                        logging.info(f"Set status to 'Success' for user {username} in CSV")
-                        success_count += 1
-                    else:
-                        logging.error(f"Failed to update user {username}")
-                        row['Status'] = 'Failure'
-                        logging.info(f"Set status to 'Failure' for user {username} in CSV")
-                        error_count += 1
-                
-                writer.writerow(row)
-                f_out.flush()  # Flush after each row to ensure it's written to disk
-        
-        # Files are now closed, safe to replace or remove
-        # Replace original CSV with updated one
-        if not dry_run:
-            logging.info(f"Replacing {csv_file} with updated version from {temp_csv}")
-            try:
-                os.replace(temp_csv, csv_file)
-                logging.info(f"Successfully replaced CSV file: {csv_file}")
-                
-                # Verify the replacement was successful
-                if os.path.exists(csv_file):
-                    logging.info(f"Verified: Updated CSV file exists at {csv_file}")
-                else:
-                    logging.error(f"ERROR: CSV file not found after replacement: {csv_file}")
-                    raise FileNotFoundError(f"CSV file not found after replacement: {csv_file}")
-                    
-                # Verify temp file was consumed by os.replace
-                if os.path.exists(temp_csv):
-                    logging.warning(f"WARNING: Temporary file still exists after replacement: {temp_csv}")
-                    # Clean up lingering temp file
-                    try:
-                        os.remove(temp_csv)
-                        logging.info(f"Removed lingering temporary file: {temp_csv}")
-                    except OSError as e:
-                        logging.warning(f"Could not remove temporary file {temp_csv}: {e}")
-                else:
-                    logging.info(f"Verified: Temporary file was removed: {temp_csv}")
-            except OSError as e:
-                logging.error(f"ERROR: Failed to replace CSV file: {e}")
-                raise
-        else:
-            # In dry-run, remove temp file
-            if os.path.exists(temp_csv):
-                os.remove(temp_csv)
+                    logging.error(f"Failed to update user {username}")
+                    row['Status'] = 'Failure'
+                    logging.info(f"Set status to 'Failure' for user {username} in CSV")
+                    error_count += 1
+            
+            # Write updated CSV after each successful update to ensure incremental progress
+            write_csv_atomically(csv_file, fieldnames, rows)
     
     except Exception as e:
         logging.error(f"Error during processing: {e}")
-        # Clean up temp file on error (files are closed due to exception)
-        if temp_csv and os.path.exists(temp_csv):
-            try:
-                os.remove(temp_csv)
-            except OSError as cleanup_error:
-                logging.warning(f"Could not remove temporary file {temp_csv}: {cleanup_error}")
+        # Write final state to CSV before raising
+        try:
+            write_csv_atomically(csv_file, fieldnames, rows)
+        except Exception as write_error:
+            logging.error(f"Failed to write CSV during error handling: {write_error}")
         raise
     
     logging.info(f"\n{'='*60}")
