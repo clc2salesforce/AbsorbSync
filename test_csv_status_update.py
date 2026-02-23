@@ -188,11 +188,9 @@ class TestCsvStatusUpdateAfterEachCall(unittest.TestCase):
             source_field='externalId',
         )
 
-        # In dry-run mode, _save_csv still writes to the file but with
-        # dry-run status updates. The file IS updated (status changes to
-        # 'Success' even in dry-run) since dry-run simulates the sync.
+        # Original CSV should be completely unchanged in dry-run mode
         after_rows = read_csv_rows(self.csv_path)
-        self.assertEqual(len(after_rows), len(original_rows))
+        self.assertEqual(original_rows, after_rows)
 
     @patch('builtins.input', return_value='yes')
     def test_no_temp_files_created(self, mock_input):

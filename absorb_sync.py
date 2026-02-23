@@ -688,7 +688,9 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
     
     def _save_csv():
-        """Rewrite the CSV file with all rows from memory."""
+        """Rewrite the CSV file with all rows from memory (skipped in dry-run)."""
+        if dry_run:
+            return
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
