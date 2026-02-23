@@ -97,10 +97,8 @@ class TestCsvStatusUpdateAfterEachCall(unittest.TestCase):
         # There should be 3 API calls (one per user)
         self.assertEqual(len(csv_snapshots), 3)
 
-        # After 1st API call: CSV should already have the header written
-        # (the 1st user's row hasn't been written yet when update_user is called,
-        # but previous rows should be visible after their writes)
-        # After the 2nd call, the 1st user's status should be in the CSV
+        # Each snapshot is taken during update_user, before that row is written.
+        # So after the 2nd call, the 1st user's row has been flushed to disk.
         snapshot_after_2nd = csv_snapshots[1]
         self.assertTrue(len(snapshot_after_2nd) >= 1, "After 2nd API call, at least 1 row should be in CSV")
         self.assertEqual(snapshot_after_2nd[0]['Status'], 'Success',

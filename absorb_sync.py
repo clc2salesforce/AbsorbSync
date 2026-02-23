@@ -782,12 +782,16 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 f_out.flush()  # Flush after each row to ensure it's written to disk
         
         # Files are now closed, safe to clean up
-        # In non-dry-run mode, updates were written directly to csv_file
-        # In dry-run mode, updates were written to temp_csv (original unchanged)
-        if os.path.exists(temp_csv):
-            os.remove(temp_csv)
         if not dry_run:
+            # Non-dry-run: updates were written directly to csv_file;
+            # temp_csv was the backup of the original data
+            if os.path.exists(temp_csv):
+                os.remove(temp_csv)
             logging.info(f"Updated CSV saved to {csv_file}")
+        else:
+            # Dry-run: updates were written to temp_csv; original unchanged
+            if os.path.exists(temp_csv):
+                os.remove(temp_csv)
     
     except Exception as e:
         logging.error(f"Error during processing: {e}")
