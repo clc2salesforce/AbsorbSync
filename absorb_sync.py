@@ -127,15 +127,16 @@ class AbsorbLMSClient:
             return False
     
     def _retry_request(self, method: str, url: str, max_retries: int = 5, 
-                      initial_delay: float = 1.0, **kwargs) -> requests.Response:
+                      initial_delay: float = 1.0, max_reauth_attempts: int = 1, **kwargs) -> requests.Response:
         """
-        Make an HTTP request with exponential backoff retry logic.
+        Make an HTTP request with exponential backoff retry logic and automatic reauthentication.
         
         Args:
             method: HTTP method (GET, POST, PUT, etc.)
             url: URL to request
             max_retries: Maximum number of retry attempts
             initial_delay: Initial delay in seconds before first retry
+            max_reauth_attempts: Maximum number of reauthentication attempts on 401 errors (default: 1)
             **kwargs: Additional arguments to pass to requests
             
         Returns:
@@ -147,6 +148,7 @@ class AbsorbLMSClient:
         """
         delay = initial_delay
         last_error = None
+        reauth_attempts = 0
         
         # Debug logging for the request
         if self.debug:
@@ -172,7 +174,8 @@ class AbsorbLMSClient:
                 logging.info(f"DEBUG: Params: {kwargs['params']}")
             logging.info("="*60)
         
-        for attempt in range(max_retries):
+        attempt = 0
+        while True:
             try:
                 response = self.session.request(method, url, **kwargs)
                 
@@ -185,11 +188,36 @@ class AbsorbLMSClient:
                     logging.info(f"DEBUG: Response Body: {response.text[:500]}...")  # First 500 chars
                     logging.info("="*60)
                 
+                # Handle 401 Unauthorized - token may have expired
+                if response.status_code == 401:
+                    # Check if this is the authenticate endpoint by comparing with the auth URL
+                    auth_url = f"{self.api_url}/authenticate"
+                    is_auth_endpoint = url.rstrip('/') == auth_url.rstrip('/')
+                    
+                    # Skip reauthentication if this is the authenticate endpoint itself
+                    if not is_auth_endpoint and reauth_attempts < max_reauth_attempts:
+                        reauth_attempts += 1
+                        logging.warning(
+                            f"Received 401 Unauthorized. Attempting reauthentication "
+                            f"({reauth_attempts}/{max_reauth_attempts})..."
+                        )
+                        if self.authenticate():
+                            logging.info("Reauthentication successful. Retrying original request...")
+                            # Continue without incrementing attempt counter
+                            continue
+                        else:
+                            logging.error("Reauthentication failed")
+                            return response
+                    else:
+                        # Either this is the auth endpoint, or we've exhausted reauth attempts
+                        return response
+                
                 # If we get a rate limit or server error, retry
                 if response.status_code in [429, 500, 502, 503, 504]:
                     if attempt < max_retries - 1:
+                        attempt += 1
                         logging.warning(
-                            f"Retry {attempt + 1}/{max_retries} for {method} {url} "
+                            f"Retry {attempt}/{max_retries} for {method} {url} "
                             f"(status: {response.status_code})"
                         )
                         time.sleep(delay)
@@ -201,6 +229,7 @@ class AbsorbLMSClient:
                             f"Max retries exceeded. Last status: {response.status_code}"
                         )
                 
+                # For successful or non-retryable responses, return immediately
                 return response
                 
             except requests.exceptions.RequestException as e:
@@ -208,8 +237,9 @@ class AbsorbLMSClient:
                 if self.debug:
                     logging.info(f"DEBUG: Request Exception: {last_error}")
                 if attempt < max_retries - 1:
+                    attempt += 1
                     logging.warning(
-                        f"Retry {attempt + 1}/{max_retries} for {method} {url} "
+                        f"Retry {attempt}/{max_retries} for {method} {url} "
                         f"(error: {last_error})"
                     )
                     time.sleep(delay)
