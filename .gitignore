@@ -8,6 +8,9 @@ logs/
 # CSV files with user data
 *.csv
 
+# Progress tracking files (resume support)
+*.progress
+
 # Python
 __pycache__/
 *.py[cod]

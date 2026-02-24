@@ -37,9 +37,18 @@ Synchronize user data between fields in Absorb LMS. Syncs from a source field (d
 
 ### API Integration
 - Absorb LMS REST API v2 authentication
+- **Parallel API requests** with configurable `--workers` for concurrent processing
+- **Thread-safe token management**: token generated once, automatically refreshed on expiry
 - Exponential backoff retry logic for transient failures (429, 5xx errors)
 - Supports 200 requests per second (no artificial delays)
 - Proper pagination with page-based offsets
+
+### Fault Tolerance and Resume
+- **Crash-safe progress tracking** via append-only progress file
+- **Automatic resume**: re-run with `--file` to continue from where a previous run stopped
+- Failed rows (status: Failure) are automatically retried on resume
+- Successfully processed rows (Success, Different, Wrong Format) are skipped on resume
+- Scales to **millions of rows** with memory-efficient batch processing
 
 ### Filtering and Validation
 - Filter by department ID
@@ -122,7 +131,8 @@ python absorb_sync.py --help
 #### Processing Mode Options
 - `--update` - Actually perform updates (default is dry-run mode)
 - `--dry-run` - Explicitly enable dry-run mode (no changes made, this is the default)
-- `--file FILE` - Process existing CSV file instead of downloading from API
+- `--file FILE` - Process existing CSV file instead of downloading from API. Automatically resumes from where a previous run left off.
+- `--workers N` - Number of parallel workers for concurrent API requests (default: 1). Recommended: 5-20 depending on API rate limits.
 
 #### Filtering Options
 - `--blank` - Filter to only users with null/empty destination field
@@ -202,6 +212,12 @@ python absorb_sync.py --customField decimal1 --alpha --overwrite --update
 ```bash
 # Process existing CSV file (skip download)
 python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
+
+# Use parallel workers for faster processing (10 concurrent API requests)
+python absorb_sync.py --customField decimal1 --workers 10 --update
+
+# Resume a previously interrupted run (progress is saved automatically)
+python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update
 
 # Debug mode for troubleshooting (prints API keys in cleartext)
 python absorb_sync.py --customField decimal1 --debug --dry-run
@@ -400,6 +416,20 @@ python absorb_sync.py --debug --dry-run
 
 ## Performance and Fault Tolerance
 
+### Parallel Processing
+
+- Use `--workers N` to enable concurrent API requests (default: 1 for sequential)
+- Rows are processed in batches proportional to the worker count
+- Memory-efficient: only the current batch is held in memory at a time
+- Recommended: start with `--workers 5` and increase based on API rate limits
+
+### Thread-Safe Token Management
+
+- Authentication token is generated **once** at startup
+- Token is automatically refreshed if it expires during a long-running operation
+- Thread-safe: if multiple workers detect an expired token, only one re-authenticates
+- Other workers wait for the new token and retry their requests
+
 ### High Performance
 
 - **No artificial delays** between successful API requests
@@ -409,14 +439,20 @@ python absorb_sync.py --debug --dry-run
 
 ### Fault Tolerance
 
-**Incremental CSV Writing:**
-- CSV flushed to disk after each batch during download
-- Status updates flushed to disk after each user during processing
-- If script crashes, CSV shows exact progress
+**Progress Tracking:**
+- A `.progress` file is maintained alongside the CSV during processing
+- Progress is written after each individual user completes (append-only for crash safety)
+- If the script crashes, the progress file preserves all completed work
 
 **Resume Capability:**
-- Use `--file` flag to reprocess an existing CSV file
-- Useful for resuming after failures or network interruptions
+- Use `--file` flag to resume from where a previous run stopped
+- Rows with terminal statuses (Success, Different, Wrong Format) are skipped
+- Rows that previously failed (Failure) are automatically retried
+- Example: `python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update`
+
+**Incremental CSV Writing:**
+- CSV flushed to disk after each batch during download
+- After all processing completes, progress is merged back into the CSV
 
 **Exponential Backoff:**
 - Automatic retry for transient failures
@@ -506,14 +542,16 @@ The script implements Absorb LMS REST API v2 authentication:
 **Issue:** Script stopped during long-running operation
 
 **Solution:**
-1. Check the CSV file - it shows where the script stopped
+1. Check the CSV file and `.progress` file - they show where the script stopped
 2. For download interruption:
    - Re-run the script (it will create a new CSV)
 3. For processing interruption:
-   - Use `--file` flag to resume:
+   - Re-run with `--file` flag to resume automatically:
    ```bash
-   python absorb_sync.py --file users_20260219_123456.csv --update
+   python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update
    ```
+   - Previously successful rows are skipped; failed rows are retried
+   - The `.progress` file is cleaned up after successful completion
 
 ### Debug Mode
 
