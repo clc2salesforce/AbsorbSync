@@ -920,7 +920,9 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     progress_lock = threading.Lock()
     counters_lock = threading.Lock()
     
-    # Batch size controls memory usage: only this many rows are held in memory at once
+    # Batch size balances memory usage (rows held in memory) vs thread pool efficiency.
+    # Using workers * 10 keeps the pool busy while limiting memory; minimum 100 avoids
+    # excessive overhead for small worker counts.
     batch_size = max(workers * 10, 100)
     
     def process_and_track(row):
@@ -932,6 +934,34 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         if status:
             _append_progress(progress_file, row['id'], status, progress_lock)
         return status, result_type
+    
+    def collect_batch_results(futures):
+        """Collect results from a batch of futures, updating counters."""
+        nonlocal success_count, error_count, skip_count, processed_total
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                status, result_type = future.result()
+                with counters_lock:
+                    if result_type == 'success':
+                        success_count += 1
+                    elif result_type == 'error':
+                        error_count += 1
+                    elif result_type == 'skip':
+                        skip_count += 1
+                    processed_total += 1
+                    if processed_total % 100 == 0:
+                        logging.info(
+                            f"Progress: {processed_total}/{remaining_count} users processed"
+                        )
+            except Exception as e:
+                failed_row = futures[future]
+                logging.error(
+                    f"Unexpected error processing user {failed_row.get('id', 'unknown')}: {e}"
+                )
+                _append_progress(progress_file, failed_row['id'], 'Failure', progress_lock)
+                with counters_lock:
+                    error_count += 1
+                    processed_total += 1
     
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -962,61 +992,14 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     batch.append(row)
                     
                     if len(batch) >= batch_size:
-                        # Submit batch for parallel processing
                         futures = {executor.submit(process_and_track, r): r for r in batch}
-                        for future in concurrent.futures.as_completed(futures):
-                            try:
-                                status, result_type = future.result()
-                                with counters_lock:
-                                    if result_type == 'success':
-                                        success_count += 1
-                                    elif result_type == 'error':
-                                        error_count += 1
-                                    elif result_type == 'skip':
-                                        skip_count += 1
-                                    processed_total += 1
-                                    if processed_total % 100 == 0:
-                                        logging.info(
-                                            f"Progress: {processed_total}/{remaining_count} users processed"
-                                        )
-                            except Exception as e:
-                                r = futures[future]
-                                logging.error(
-                                    f"Unexpected error processing user {r.get('id', 'unknown')}: {e}"
-                                )
-                                _append_progress(progress_file, r['id'], 'Failure', progress_lock)
-                                with counters_lock:
-                                    error_count += 1
-                                    processed_total += 1
+                        collect_batch_results(futures)
                         batch = []
                 
                 # Process remaining rows in the last batch
                 if batch:
                     futures = {executor.submit(process_and_track, r): r for r in batch}
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            status, result_type = future.result()
-                            with counters_lock:
-                                if result_type == 'success':
-                                    success_count += 1
-                                elif result_type == 'error':
-                                    error_count += 1
-                                elif result_type == 'skip':
-                                    skip_count += 1
-                                processed_total += 1
-                                if processed_total % 100 == 0:
-                                    logging.info(
-                                        f"Progress: {processed_total}/{remaining_count} users processed"
-                                    )
-                        except Exception as e:
-                            r = futures[future]
-                            logging.error(
-                                f"Unexpected error processing user {r.get('id', 'unknown')}: {e}"
-                            )
-                            _append_progress(progress_file, r['id'], 'Failure', progress_lock)
-                            with counters_lock:
-                                error_count += 1
-                                processed_total += 1
+                    collect_batch_results(futures)
         
         # Merge progress into CSV after all processing
         _merge_progress_to_csv(csv_file, progress_file)
