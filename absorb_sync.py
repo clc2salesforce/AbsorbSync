@@ -44,7 +44,7 @@ except ImportError:
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
     
-    def __init__(self, api_url: str, api_key: str, username: str, password: str, debug: bool = False):
+    def __init__(self, api_url: str, api_key: str, username: str, password: str, debug: bool = False, pool_size: int = 60):
         """
         Initialize the Absorb LMS client.
         
@@ -61,6 +61,11 @@ class AbsorbLMSClient:
         self.password = password
         self.debug = debug
         self.session = requests.Session()
+
+        adapter = requests.adapters.HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         # Set the API key header for all requests
         self.session.headers.update({
             "x-api-key": self.api_key
