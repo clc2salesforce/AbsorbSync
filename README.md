@@ -37,6 +37,7 @@ Synchronize user data between fields in Absorb LMS. Syncs from a source field (d
 
 ### API Integration
 - Absorb LMS REST API v2 authentication
+- **Batch updates**: Uses POST `/users/upload/` endpoint to update up to 200 users per request
 - **Parallel API requests** with configurable `--workers` for concurrent processing
 - **Thread-safe token management**: token generated once, automatically refreshed on expiry
 - Exponential backoff retry logic for transient failures (429, 5xx errors)
@@ -359,7 +360,7 @@ users_20260219_123456.csv
   - If using `--customField decimal1` (default), which becomes `customFields.decimal1`, the column is named `current_customFields_decimal1`
   - If using `--destinationField externalId`, the column is named `current_externalId`
   - If using `--destinationField customFields.string1`, the column is named `current_customFields_string1`
-- **user_data_json** - Complete user profile as JSON (needed for PUT updates)
+- **user_data_json** - Complete user profile as JSON (needed for batch updates)
 
 ### Incremental Updates
 
@@ -419,7 +420,9 @@ python absorb_sync.py --debug --dry-run
 ### Parallel Processing
 
 - Use `--workers N` to enable concurrent API requests (default: 1 for sequential)
-- Rows are processed in batches proportional to the worker count
+- **Batch updates**: Up to 200 users per API request using POST `/users/upload/` endpoint
+- Validation phase runs in parallel with all workers
+- Batch submission phase groups validated users into batches of 200
 - Memory-efficient: only the current batch is held in memory at a time
 - Recommended: start with `--workers 5` and increase based on API rate limits
 
@@ -432,10 +435,11 @@ python absorb_sync.py --debug --dry-run
 
 ### High Performance
 
+- **Batch API calls**: Up to 200 users updated per request, significantly reducing API overhead
 - **No artificial delays** between successful API requests
 - Only exponential backoff on failures (429, 5xx errors)
 - Supports Absorb API's **200 requests per second** limit
-- Default page size: **500 users per batch**
+- Default page size: **500 users per batch** during download
 
 ### Fault Tolerance
 
