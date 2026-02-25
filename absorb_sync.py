@@ -16,12 +16,14 @@ Features:
 """
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -58,6 +60,8 @@ class AbsorbLMSClient:
             "x-api-key": self.api_key
         })
         self.token = None
+        self._auth_lock = threading.Lock()
+        self._token_version = 0
         
         if self.debug:
             logging.info("="*60)
@@ -113,6 +117,7 @@ class AbsorbLMSClient:
                     self.session.headers.update({
                         "Authorization": self.token
                     })
+                    self._token_version += 1
                     logging.info("Authentication successful")
                     return True
                 else:
@@ -125,6 +130,25 @@ class AbsorbLMSClient:
         except Exception as e:
             logging.error(f"Authentication error: {str(e)}")
             return False
+    
+    def _try_reauthenticate(self, token_version_before: int) -> bool:
+        """
+        Thread-safe reauthentication that avoids duplicate auth calls.
+        
+        If another thread has already refreshed the token since the caller observed
+        the failure, the new token is used without re-authenticating.
+        
+        Args:
+            token_version_before: The token version observed before the failed request
+            
+        Returns:
+            bool: True if a valid token is now available, False otherwise
+        """
+        with self._auth_lock:
+            if self._token_version > token_version_before:
+                # Another thread already refreshed the token
+                return True
+            return self.authenticate()
     
     def _retry_request(self, method: str, url: str, max_retries: int = 5, 
                       initial_delay: float = 1.0, max_reauth_attempts: int = 1, **kwargs) -> requests.Response:
@@ -197,11 +221,12 @@ class AbsorbLMSClient:
                     # Skip reauthentication if this is the authenticate endpoint itself
                     if not is_auth_endpoint and reauth_attempts < max_reauth_attempts:
                         reauth_attempts += 1
+                        token_ver = self._token_version
                         logging.warning(
                             f"Received 401 Unauthorized. Attempting reauthentication "
                             f"({reauth_attempts}/{max_reauth_attempts})..."
                         )
-                        if self.authenticate():
+                        if self._try_reauthenticate(token_ver):
                             logging.info("Reauthentication successful. Retrying original request...")
                             # Continue without incrementing attempt counter
                             continue
@@ -486,6 +511,190 @@ def sanitize_field_path_for_csv(field_path: str) -> str:
     return field_path.replace('.', '_')
 
 
+# Terminal statuses that should not be reprocessed on resume
+TERMINAL_STATUSES = {'Success', 'Different', 'Wrong Format'}
+
+
+def _get_progress_file_path(csv_file: str) -> str:
+    """Get the progress tracking file path for a given CSV file."""
+    return csv_file + '.progress'
+
+
+def _load_progress(progress_file: str) -> Dict[str, str]:
+    """
+    Load completed user IDs and their statuses from a progress file.
+    
+    The progress file is append-only. If a user has multiple entries (e.g., first
+    Failure then Success on retry), the last entry wins.
+    
+    Args:
+        progress_file: Path to the progress tracking file
+        
+    Returns:
+        Dictionary mapping user IDs to their processing status
+    """
+    progress = {}
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for row_data in reader:
+                    if len(row_data) >= 2:
+                        progress[row_data[0]] = row_data[1]
+        except Exception as e:
+            logging.warning(f"Error reading progress file {progress_file}: {e}")
+    return progress
+
+
+def _append_progress(progress_file: str, user_id: str, status: str, lock: threading.Lock) -> None:
+    """
+    Append a progress entry in a thread-safe manner.
+    
+    Args:
+        progress_file: Path to the progress tracking file
+        user_id: User ID that was processed
+        status: Processing status (Success, Failure, Different, Wrong Format)
+        lock: Threading lock for file write synchronization
+    """
+    with lock:
+        with open(progress_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([user_id, status])
+            f.flush()
+
+
+def _merge_progress_to_csv(csv_file: str, progress_file: str) -> None:
+    """
+    Merge progress tracking data back into the main CSV file.
+    
+    Updates the Status column in the CSV for each user found in the progress file,
+    then removes the progress file.
+    
+    Args:
+        csv_file: Path to the main CSV file
+        progress_file: Path to the progress tracking file
+    """
+    progress = _load_progress(progress_file)
+    if not progress:
+        return
+    
+    temp_dir = os.path.dirname(csv_file) or '.'
+    temp_csv = None
+    
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, suffix='.tmp',
+                                     newline='', encoding='utf-8') as temp_file:
+        temp_csv = temp_file.name
+    
+    try:
+        with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
+             open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
+            reader = csv.DictReader(f_in)
+            writer = csv.DictWriter(f_out, fieldnames=reader.fieldnames)
+            writer.writeheader()
+            
+            for row in reader:
+                user_id = row['id']
+                if user_id in progress:
+                    row['Status'] = progress[user_id]
+                writer.writerow(row)
+        
+        os.replace(temp_csv, csv_file)
+        
+        # Remove progress file after successful merge
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+        
+        logging.info(f"Merged progress into {csv_file}")
+    
+    except Exception as e:
+        logging.error(f"Error merging progress to CSV: {e}")
+        if temp_csv and os.path.exists(temp_csv):
+            try:
+                os.remove(temp_csv)
+            except OSError:
+                pass
+        raise
+
+
+def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
+                          source_field: str, destination_field: str,
+                          dest_col_name: str, dry_run: bool, overwrite: bool,
+                          allow_alpha: bool) -> tuple:
+    """
+    Process a single user row: validate and update via API.
+    
+    Args:
+        client: Authenticated AbsorbLMSClient instance
+        row: CSV row dictionary for the user
+        source_field: Name of the source field
+        destination_field: Full path to the destination field
+        dest_col_name: CSV column name for the current destination field value
+        dry_run: If True, simulate the update
+        overwrite: If True, update even if destination field has a different value
+        allow_alpha: If True, allow alphanumeric source values
+        
+    Returns:
+        Tuple of (status, result_type) where:
+        - status: New CSV status string or None for silent skips
+        - result_type: 'success', 'error', 'skip', or 'skip_blank'
+    """
+    user_id = row['id']
+    username = row['username']
+    source_value = row[source_field]
+    current_field_value = row.get(dest_col_name, '')
+    user_data_json = row['user_data_json']
+    
+    try:
+        user_data = json.loads(user_data_json)
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse user data for {username}: {e}")
+        return 'Failure', 'error'
+    
+    # Check if source value is blank but destination field is set
+    if not source_value and current_field_value:
+        logging.info(
+            f"Skipping user {username} (ID: {user_id}) - {source_field} is blank "
+            f"but {destination_field} is set: {current_field_value}"
+        )
+        return 'Different', 'skip'
+    
+    # Skip users with blank source value
+    if not source_value:
+        return None, 'skip_blank'
+    
+    # Validate source value format if not allowing alphanumeric
+    if not allow_alpha and not is_numeric_only(source_value):
+        logging.info(
+            f"Skipping user {username} (ID: {user_id}) - {source_field} "
+            f"'{source_value}' is not numeric (use --alpha to allow alphanumeric)"
+        )
+        return 'Wrong Format', 'skip'
+    
+    # Check if we should skip this user based on overwrite flag
+    current_field_int = parse_int_from_string(current_field_value)
+    source_value_int = parse_int_from_string(source_value)
+    
+    if not overwrite and current_field_int is not None and current_field_int != source_value_int:
+        logging.info(
+            f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, "
+            f"Current {destination_field}: {current_field_value} (different values)"
+        )
+        return 'Different', 'skip'
+    
+    logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
+    
+    if dry_run:
+        logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
+        return 'Success', 'success'
+    else:
+        if client.update_user(user_data, source_value, destination_field):
+            logging.info(f"Successfully updated user {username}")
+            return 'Success', 'success'
+        else:
+            logging.error(f"Failed to update user {username}")
+            return 'Failure', 'error'
+
+
 def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
     """
     Load secrets from a text file.
@@ -594,9 +803,14 @@ def is_numeric_only(value: str) -> bool:
 def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: str = None, 
                       filter_blank: bool = False, overwrite: bool = False, 
                       use_existing_file: bool = False, allow_alpha: bool = False,
-                      department_id: str = None, destination_field: str = 'customFields.decimal1', source_field: str = 'externalId') -> tuple:
+                      department_id: str = None, destination_field: str = 'customFields.decimal1',
+                      source_field: str = 'externalId', workers: int = 1) -> tuple:
     """
     Sync values from the source field to the specified destination field.
+    
+    Supports parallel processing with configurable worker count and crash-safe
+    resume via a progress file. If the script is interrupted, re-running with
+    --file will resume from where it left off.
     
     Args:
         client: Authenticated AbsorbLMSClient instance
@@ -609,6 +823,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         department_id: If provided, filter by departmentId
         destination_field: Full path to destination field (default: customFields.decimal1)
         source_field: Name of the source field to sync from (default: externalId)
+        workers: Number of parallel workers for API requests (default: 1)
         
     Returns:
         Tuple of (success_count, error_count, skip_count)
@@ -619,6 +834,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     logging.info("Starting field sync...")
     logging.info(f"Source field: {source_field}")
     logging.info(f"Destination field: {destination_field}")
+    logging.info(f"Parallel workers: {workers}")
     
     if dry_run:
         logging.info("DRY RUN MODE - No changes will be made")
@@ -655,14 +871,39 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         logging.warning(f"No users with {source_field} found. Exiting.")
         return 0, 0, 0
     
+    # Load progress for resume support
+    progress_file = _get_progress_file_path(csv_file)
+    completed = _load_progress(progress_file)
+    if completed:
+        logging.info(f"Resuming: found {len(completed)} previously processed users in progress file")
+    
+    # Count remaining rows to process
+    dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
+    remaining_count = 0
+    with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            user_id = row['id']
+            if user_id in completed and completed[user_id] in TERMINAL_STATUSES:
+                continue
+            if row['Status'] in TERMINAL_STATUSES:
+                continue
+            remaining_count += 1
+    
+    if remaining_count == 0:
+        logging.info("All users have already been processed.")
+        if completed:
+            _merge_progress_to_csv(csv_file, progress_file)
+        return 0, 0, 0
+    
     # Ask for confirmation
     logging.info("\n" + "="*60)
-    logging.info(f"Ready to process {users_count} users")
+    logging.info(f"Ready to process {remaining_count} users ({users_count} total in CSV)")
     logging.info("="*60)
     
     if not dry_run:
         try:
-            confirmation = input(f"\nDo you want to proceed with updating {users_count} users? (yes/y/no): ")
+            confirmation = input(f"\nDo you want to proceed with updating {remaining_count} users? (yes/y/no): ")
             if confirmation.lower() not in ['yes', 'y']:
                 logging.info("Update cancelled by user")
                 return 0, 0, 0
@@ -670,126 +911,102 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             logging.info("\nUpdate cancelled by user")
             return 0, 0, 0
     
-    # Process the CSV file and update incrementally
-    logging.info("\nProcessing users...")
+    # Process users with parallel workers
+    logging.info(f"\nProcessing users with {workers} parallel worker(s)...")
     success_count = 0
     error_count = 0
-    skip_count = 0  # Initialize as local variable
+    skip_count = 0
+    processed_total = 0
+    progress_lock = threading.Lock()
+    counters_lock = threading.Lock()
     
-    # Helper function to skip a user and write to CSV
-    def skip_user(row, status, message, writer, f_out):
-        """Skip a user, update status, log, and write to CSV."""
-        nonlocal skip_count
-        logging.info(message)
-        row['Status'] = status
-        skip_count += 1
-        writer.writerow(row)
-        f_out.flush()
+    # Batch size balances memory usage (rows held in memory) vs thread pool efficiency.
+    # Using workers * 10 keeps the pool busy while limiting memory; minimum 100 avoids
+    # excessive overhead for small worker counts.
+    batch_size = max(workers * 10, 100)
     
-    # Read CSV, process each user, and update CSV incrementally
-    temp_csv = None
-    temp_dir = os.path.dirname(csv_file) or '.'
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=temp_dir, suffix='.tmp', newline='', encoding='utf-8') as temp_file:
-        temp_csv = temp_file.name
+    def process_and_track(row):
+        """Process a single user and record result to progress file."""
+        status, result_type = _process_single_user(
+            client, row, source_field, destination_field,
+            dest_col_name, dry_run, overwrite, allow_alpha
+        )
+        if status:
+            _append_progress(progress_file, row['id'], status, progress_lock)
+        return status, result_type
+    
+    def collect_batch_results(futures):
+        """Collect results from a batch of futures, updating counters."""
+        nonlocal success_count, error_count, skip_count, processed_total
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                status, result_type = future.result()
+                with counters_lock:
+                    if result_type == 'success':
+                        success_count += 1
+                    elif result_type == 'error':
+                        error_count += 1
+                    elif result_type == 'skip':
+                        skip_count += 1
+                    processed_total += 1
+                    if processed_total % 100 == 0:
+                        logging.info(
+                            f"Progress: {processed_total}/{remaining_count} users processed"
+                        )
+            except Exception as e:
+                failed_row = futures[future]
+                logging.error(
+                    f"Unexpected error processing user {failed_row.get('id', 'unknown')}: {e}"
+                )
+                _append_progress(progress_file, failed_row['id'], 'Failure', progress_lock)
+                with counters_lock:
+                    error_count += 1
+                    processed_total += 1
     
     try:
-        with open(csv_file, 'r', newline='', encoding='utf-8') as f_in, \
-             open(temp_csv, 'w', newline='', encoding='utf-8') as f_out:
-            
-            reader = csv.DictReader(f_in)
-            fieldnames = reader.fieldnames
-            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            # Get the destination field column name from CSV
-            dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
-            
-            for row in reader:
-                user_id = row['id']
-                username = row['username']
-                source_value = row[source_field]
-                # Get current destination field value using dynamic column name
-                current_field_value = row.get(dest_col_name, '')
-                user_data_json = row['user_data_json']
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                batch = []
                 
-                try:
-                    user_data = json.loads(user_data_json)
-                except json.JSONDecodeError as e:
-                    logging.error(f"Failed to parse user data for {username}: {e}")
-                    row['Status'] = 'Failure'
-                    error_count += 1
-                    writer.writerow(row)
-                    f_out.flush()  # Flush after each row
-                    continue
+                for row in reader:
+                    user_id = row['id']
+                    
+                    # Skip rows already completed in progress file (terminal statuses)
+                    if user_id in completed and completed[user_id] in TERMINAL_STATUSES:
+                        status = completed[user_id]
+                        if status == 'Success':
+                            success_count += 1
+                        else:
+                            skip_count += 1
+                        continue
+                    
+                    # Skip rows with terminal status already in CSV
+                    if row['Status'] in TERMINAL_STATUSES:
+                        if row['Status'] == 'Success':
+                            success_count += 1
+                        else:
+                            skip_count += 1
+                        continue
+                    
+                    batch.append(row)
+                    
+                    if len(batch) >= batch_size:
+                        futures = {executor.submit(process_and_track, r): r for r in batch}
+                        collect_batch_results(futures)
+                        batch = []
                 
-                # Check if source value is blank but destination field is set
-                if not source_value and current_field_value:
-                    skip_user(row, 'Different', 
-                             f"Skipping user {username} (ID: {user_id}) - {source_field} is blank but {destination_field} is set: {current_field_value}",
-                             writer, f_out)
-                    continue
-                
-                # Skip users with blank source value (and blank destination field, since we already handled blank source + set destination field)
-                if not source_value:
-                    continue
-                
-                # Validate source value format if not allowing alphanumeric
-                if not allow_alpha and not is_numeric_only(source_value):
-                    skip_user(row, 'Wrong Format',
-                             f"Skipping user {username} (ID: {user_id}) - {source_field} '{source_value}' is not numeric (use --alpha to allow alphanumeric)",
-                             writer, f_out)
-                    continue
-                
-                # Check if we should skip this user based on overwrite flag
-                # For decimal fields, remove decimals for comparison (source value may be a whole number)
-                # For string fields, compare directly
-                current_field_int = parse_int_from_string(current_field_value)
-                source_value_int = parse_int_from_string(source_value)
-                
-                # Skip if values don't match and overwrite is False
-                if not overwrite and current_field_int is not None and current_field_int != source_value_int:
-                    skip_user(row, 'Different',
-                             f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, Current {destination_field}: {current_field_value} (different values)",
-                             writer, f_out)
-                    continue
-                
-                logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
-                
-                if dry_run:
-                    logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
-                    row['Status'] = 'Success'
-                    success_count += 1
-                else:
-                    if client.update_user(user_data, source_value, destination_field):
-                        logging.info(f"Successfully updated user {username}")
-                        row['Status'] = 'Success'
-                        success_count += 1
-                    else:
-                        logging.error(f"Failed to update user {username}")
-                        row['Status'] = 'Failure'
-                        error_count += 1
-                
-                writer.writerow(row)
-                f_out.flush()  # Flush after each row to ensure it's written to disk
+                # Process remaining rows in the last batch
+                if batch:
+                    futures = {executor.submit(process_and_track, r): r for r in batch}
+                    collect_batch_results(futures)
         
-        # Files are now closed, safe to replace or remove
-        # Replace original CSV with updated one
-        if not dry_run:
-            os.replace(temp_csv, csv_file)
-            logging.info(f"Updated CSV saved to {csv_file}")
-        else:
-            # In dry-run, remove temp file
-            if os.path.exists(temp_csv):
-                os.remove(temp_csv)
+        # Merge progress into CSV after all processing
+        _merge_progress_to_csv(csv_file, progress_file)
     
     except Exception as e:
         logging.error(f"Error during processing: {e}")
-        # Clean up temp file on error (files are closed due to exception)
-        if temp_csv and os.path.exists(temp_csv):
-            try:
-                os.remove(temp_csv)
-            except OSError as cleanup_error:
-                logging.warning(f"Could not remove temporary file {temp_csv}: {cleanup_error}")
+        logging.info(f"Progress has been saved to {progress_file}. Resume with --file {csv_file}")
         raise
     
     logging.info(f"\n{'='*60}")
@@ -845,6 +1062,12 @@ Examples:
   # Process existing CSV file instead of downloading
   python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
   
+  # Use parallel workers for faster processing (10 concurrent API requests)
+  python absorb_sync.py --customField decimal1 --workers 10 --update
+  
+  # Resume a previously interrupted run (progress is saved automatically)
+  python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update
+  
   # Combine multiple options
   python absorb_sync.py --sourceField externalId --customField decimal2 --blank --department <dept-id> --alpha --update
   
@@ -893,7 +1116,17 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
         '--file',
         default=None,
         metavar='FILE',
-        help='Process existing CSV file instead of downloading from API (skips download phase)'
+        help='Process existing CSV file instead of downloading from API (skips download phase). '
+             'Automatically resumes from where a previous run left off.'
+    )
+    mode_group.add_argument(
+        '--workers',
+        type=int,
+        default=1,
+        metavar='N',
+        help='Number of parallel workers for concurrent API requests (default: 1). '
+             'Higher values speed up processing but increase API load. '
+             'Recommended: 5-20 depending on API rate limits.'
     )
     
     # Filtering options
@@ -970,6 +1203,10 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     if args.customField:
         args.destinationField = f'customFields.{args.customField}'
     
+    # Validate workers
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+    
     # Handle dry-run vs update flag precedence
     # If --update is specified, disable dry-run (unless --dry-run is also explicitly set)
     if args.update and not args.dry_run:
@@ -1030,7 +1267,8 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
             allow_alpha=args.alpha,
             department_id=args.department,
             destination_field=args.destinationField,
-            source_field=args.sourceField
+            source_field=args.sourceField,
+            workers=args.workers
         )
         
         # Exit with appropriate code
