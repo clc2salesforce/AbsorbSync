@@ -390,8 +390,11 @@ class AbsorbLMSClient:
         """
         Update a user's destination field with the source field value.
         
+        Only sends username, departmentId, firstName, lastName, and the updated 
+        destination field to the API (minimal payload).
+        
         Args:
-            user_data: Complete user data dictionary
+            user_data: Complete user data dictionary (used to extract required fields)
             source_value: Source field value to set in the destination field
             destination_field: Full path to the destination field (e.g., 'customFields.decimal1', 'externalId')
             
