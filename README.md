@@ -37,7 +37,7 @@ Synchronize user data between fields in Absorb LMS. Syncs from a source field (d
 
 ### API Integration
 - Absorb LMS REST API v2 authentication
-- **Parallel API requests** with configurable `--workers` for concurrent processing
+- **Batch user uploads**: Uses `/users/upload/` endpoint to update up to 200 users per request
 - **Thread-safe token management**: token generated once, automatically refreshed on expiry
 - Exponential backoff retry logic for transient failures (429, 5xx errors)
 - Supports 200 requests per second (no artificial delays)
@@ -132,7 +132,7 @@ python absorb_sync.py --help
 - `--update` - Actually perform updates (default is dry-run mode)
 - `--dry-run` - Explicitly enable dry-run mode (no changes made, this is the default)
 - `--file FILE` - Process existing CSV file instead of downloading from API. Automatically resumes from where a previous run left off.
-- `--workers N` - Number of parallel workers for concurrent API requests (default: 1). Recommended: 5-20 depending on API rate limits.
+- `--workers N` - (Deprecated) Number of parallel workers. This parameter is maintained for backwards compatibility but is no longer used. The script now uses batch uploads of up to 200 users per request instead of parallel processing.
 
 #### Filtering Options
 - `--blank` - Filter to only users with null/empty destination field
@@ -213,11 +213,8 @@ python absorb_sync.py --customField decimal1 --alpha --overwrite --update
 # Process existing CSV file (skip download)
 python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
 
-# Use parallel workers for faster processing (10 concurrent API requests)
-python absorb_sync.py --customField decimal1 --workers 10 --update
-
 # Resume a previously interrupted run (progress is saved automatically)
-python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update
+python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update
 
 # Debug mode for troubleshooting (prints API keys in cleartext)
 python absorb_sync.py --customField decimal1 --debug --dry-run
@@ -359,7 +356,7 @@ users_20260219_123456.csv
   - If using `--customField decimal1` (default), which becomes `customFields.decimal1`, the column is named `current_customFields_decimal1`
   - If using `--destinationField externalId`, the column is named `current_externalId`
   - If using `--destinationField customFields.string1`, the column is named `current_customFields_string1`
-- **user_data_json** - Complete user profile as JSON (needed for PUT updates)
+- **user_data_json** - Complete user profile as JSON (needed for batch uploads)
 
 ### Incremental Updates
 
@@ -416,26 +413,26 @@ python absorb_sync.py --debug --dry-run
 
 ## Performance and Fault Tolerance
 
-### Parallel Processing
+### Batch Upload Processing
 
-- Use `--workers N` to enable concurrent API requests (default: 1 for sequential)
-- Rows are processed in batches proportional to the worker count
+- Uses `/users/upload/` API endpoint to update up to **200 users per request**
+- Automatically batches users for efficient bulk updates
 - Memory-efficient: only the current batch is held in memory at a time
-- Recommended: start with `--workers 5` and increase based on API rate limits
+- Reduces API calls significantly compared to individual PUT requests
 
 ### Thread-Safe Token Management
 
 - Authentication token is generated **once** at startup
 - Token is automatically refreshed if it expires during a long-running operation
-- Thread-safe: if multiple workers detect an expired token, only one re-authenticates
-- Other workers wait for the new token and retry their requests
+- Thread-safe token refresh with proper locking mechanisms
 
 ### High Performance
 
+- **Batch uploads** process up to 200 users per API request
 - **No artificial delays** between successful API requests
 - Only exponential backoff on failures (429, 5xx errors)
 - Supports Absorb API's **200 requests per second** limit
-- Default page size: **500 users per batch**
+- Default page size: **500 users per batch** during download
 
 ### Fault Tolerance
 
@@ -448,7 +445,7 @@ python absorb_sync.py --debug --dry-run
 - Use `--file` flag to resume from where a previous run stopped
 - Rows with terminal statuses (Success, Different, Wrong Format) are skipped
 - Rows that previously failed (Failure) are automatically retried
-- Example: `python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update`
+- Example: `python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --update`
 
 **Incremental CSV Writing:**
 - CSV flushed to disk after each batch during download
