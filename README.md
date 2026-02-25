@@ -141,6 +141,7 @@ python absorb_sync.py --help
 #### Validation and Behavior Options
 - `--overwrite` - Update destination field even if it has a different value (default: skip and mark as "Different")
 - `--alpha` - Allow alphanumeric source field values (default: numeric only, non-numeric marked as "Wrong Format")
+- `--fullProfile` - Send the full user profile in PUT requests. By default (without this flag), only `username`, `departmentId`, `firstName`, `lastName`, and the updated destination field are sent. Use this flag to maintain backward compatibility or when the API requires additional fields.
 
 #### Debug Options
 - `--debug` - Enable debug mode (prints sensitive data including API keys - USE ONLY IN SANDBOX)
@@ -205,6 +206,12 @@ python absorb_sync.py --customField decimal1 --overwrite --update
 
 # Combine: allow alphanumeric and overwrite existing values
 python absorb_sync.py --customField decimal1 --alpha --overwrite --update
+
+# Use full profile mode (sends entire user object in PUT request)
+python absorb_sync.py --customField decimal1 --fullProfile --update
+
+# Default behavior sends minimal profile (only username, departmentId, firstName, lastName, and updated field)
+python absorb_sync.py --customField decimal1 --update
 ```
 
 #### Advanced Examples
