@@ -386,7 +386,7 @@ class AbsorbLMSClient:
         logging.info(f"Total users with {source_field} saved to CSV: {users_with_source_field}")
         return users_with_source_field
     
-    def update_user(self, user_data: Dict[str, Any], source_value: str, destination_field: str) -> bool:
+    def update_user(self, user_data: Dict[str, Any], source_value: str, destination_field: str, full_profile: bool = False) -> bool:
         """
         Update a user's destination field with the source field value.
         
@@ -394,6 +394,7 @@ class AbsorbLMSClient:
             user_data: Complete user data dictionary
             source_value: Source field value to set in the destination field
             destination_field: Full path to the destination field (e.g., 'customFields.decimal1', 'externalId')
+            full_profile: If True, send full user profile; if False (default), send minimal fields only
             
         Returns:
             bool: True if update successful, False otherwise
@@ -415,10 +416,23 @@ class AbsorbLMSClient:
                 # For string fields and others, use the value as-is
                 field_value = source_value
             
-            # Set the destination field value using the helper function
-            set_nested_field_value(user_data, destination_field, field_value)
+            # Prepare the payload to send
+            if full_profile:
+                # Use the full user profile
+                payload = user_data.copy()
+                set_nested_field_value(payload, destination_field, field_value)
+            else:
+                # Create minimal user object with only required fields
+                payload = {
+                    'username': user_data.get('username'),
+                    'departmentId': user_data.get('departmentId'),
+                    'firstName': user_data.get('firstName'),
+                    'lastName': user_data.get('lastName')
+                }
+                # Add the updated destination field
+                set_nested_field_value(payload, destination_field, field_value)
             
-            # PUT the entire user profile back
+            # PUT the user profile back
             headers = {
                 "Content-Type": "application/json"
             }
@@ -426,7 +440,7 @@ class AbsorbLMSClient:
                 'PUT',
                 url,
                 headers=headers,
-                json=user_data
+                json=payload
             )
             
             if response.status_code in [200, 201, 204]:
@@ -619,7 +633,7 @@ def _merge_progress_to_csv(csv_file: str, progress_file: str) -> None:
 def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
                           source_field: str, destination_field: str,
                           dest_col_name: str, dry_run: bool, overwrite: bool,
-                          allow_alpha: bool) -> tuple:
+                          allow_alpha: bool, full_profile: bool) -> tuple:
     """
     Process a single user row: validate and update via API.
     
@@ -632,6 +646,7 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
         dry_run: If True, simulate the update
         overwrite: If True, update even if destination field has a different value
         allow_alpha: If True, allow alphanumeric source values
+        full_profile: If True, send full user profile in PUT requests; otherwise send minimal fields
         
     Returns:
         Tuple of (status, result_type) where:
@@ -687,7 +702,7 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
         logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
         return 'Success', 'success'
     else:
-        if client.update_user(user_data, source_value, destination_field):
+        if client.update_user(user_data, source_value, destination_field, full_profile):
             logging.info(f"Successfully updated user {username}")
             return 'Success', 'success'
         else:
@@ -804,7 +819,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                       filter_blank: bool = False, overwrite: bool = False, 
                       use_existing_file: bool = False, allow_alpha: bool = False,
                       department_id: str = None, destination_field: str = 'customFields.decimal1',
-                      source_field: str = 'externalId', workers: int = 1) -> tuple:
+                      source_field: str = 'externalId', workers: int = 1, full_profile: bool = False) -> tuple:
     """
     Sync values from the source field to the specified destination field.
     
@@ -824,6 +839,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         destination_field: Full path to destination field (default: customFields.decimal1)
         source_field: Name of the source field to sync from (default: externalId)
         workers: Number of parallel workers for API requests (default: 1)
+        full_profile: If True, send full user profile in PUT requests; otherwise send minimal fields
         
     Returns:
         Tuple of (success_count, error_count, skip_count)
@@ -929,7 +945,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         """Process a single user and record result to progress file."""
         status, result_type = _process_single_user(
             client, row, source_field, destination_field,
-            dest_col_name, dry_run, overwrite, allow_alpha
+            dest_col_name, dry_run, overwrite, allow_alpha, full_profile
         )
         if status:
             _append_progress(progress_file, row['id'], status, progress_lock)
@@ -1180,6 +1196,12 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
              '(e.g., externalId, username, emailAddress) or a nested field like customFields.string1. '
              'For custom fields, specify the full path (e.g., customFields.decimal1).'
     )
+    behavior_group.add_argument(
+        '--fullProfile',
+        action='store_true',
+        help='Send the full user profile in PUT requests (default: only send username, departmentId, '
+             'firstName, lastName, and the updated destination field)'
+    )
     
     # Debug options
     debug_group = parser.add_argument_group('Debug Options')
@@ -1268,7 +1290,8 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
             department_id=args.department,
             destination_field=args.destinationField,
             source_field=args.sourceField,
-            workers=args.workers
+            workers=args.workers,
+            full_profile=args.fullProfile
         )
         
         # Exit with appropriate code
