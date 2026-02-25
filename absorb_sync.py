@@ -452,6 +452,81 @@ class AbsorbLMSClient:
         except Exception as e:
             logging.error(f"Error updating user {user_id}: {str(e)}")
             return False
+    
+    def batch_update_users(self, users_batch: List[Dict[str, Any]]) -> Dict[str, bool]:
+        """
+        Update multiple users in a single POST request using the /users/upload/ endpoint.
+        
+        Can handle up to 200 users per request.
+        
+        Args:
+            users_batch: List of user update dictionaries. Each dictionary should contain:
+                - username: Username
+                - departmentId: Department UUID
+                - firstName: First name
+                - lastName: Last name
+                - customFields: Dictionary of custom fields to update (if applicable)
+                - Other fields as needed
+            
+        Returns:
+            Dict mapping username to success status (True/False)
+        """
+        url = f"{self.api_url}/users/upload/"
+        
+        try:
+            # The API expects a JSON array
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            if self.debug:
+                logging.debug(f"Batch updating {len(users_batch)} users")
+                logging.debug(f"Payload: {json.dumps(users_batch, indent=2)}")
+            
+            response = self._retry_request(
+                'POST',
+                url,
+                headers=headers,
+                json=users_batch
+            )
+            
+            if response.status_code in [200, 201]:
+                # Response is a list of {key: user_id, value: username}
+                result_map = {}
+                try:
+                    response_data = response.json()
+                    if isinstance(response_data, list):
+                        # Map usernames to success
+                        for item in response_data:
+                            username = item.get('value')
+                            if username:
+                                result_map[username] = True
+                        
+                        # Mark any users not in response as failed
+                        for user in users_batch:
+                            username = user.get('username')
+                            if username and username not in result_map:
+                                result_map[username] = False
+                        
+                        return result_map
+                    else:
+                        logging.error(f"Unexpected response format: {response.text}")
+                        # Mark all as failed
+                        return {user.get('username'): False for user in users_batch if user.get('username')}
+                except Exception as e:
+                    logging.error(f"Error parsing response: {e}")
+                    return {user.get('username'): False for user in users_batch if user.get('username')}
+            else:
+                logging.error(
+                    f"Failed to batch update users: {response.status_code} - {response.text}"
+                )
+                # Mark all as failed
+                return {user.get('username'): False for user in users_batch if user.get('username')}
+                
+        except Exception as e:
+            logging.error(f"Error batch updating users: {str(e)}")
+            # Mark all as failed
+            return {user.get('username'): False for user in users_batch if user.get('username')}
 
 
 def get_nested_field_value(data: Dict[str, Any], field_path: str) -> str:
@@ -628,15 +703,58 @@ def _merge_progress_to_csv(csv_file: str, progress_file: str) -> None:
         raise
 
 
+def _prepare_user_for_batch(user_data: Dict[str, Any], source_value: str, destination_field: str) -> Optional[Dict[str, Any]]:
+    """
+    Prepare a user's data for batch upload.
+    
+    Args:
+        user_data: Complete user data dictionary
+        source_value: Source field value to set in the destination field
+        destination_field: Full path to the destination field (e.g., 'customFields.decimal1', 'externalId')
+        
+    Returns:
+        Dictionary ready for batch upload, or None if preparation fails
+    """
+    try:
+        # Determine the appropriate value type based on the destination field name
+        field_name = destination_field.split('.')[-1] if '.' in destination_field else destination_field
+        if field_name.startswith('decimal'):
+            try:
+                field_value = float(source_value)
+            except (ValueError, TypeError):
+                logging.warning(f"Cannot convert source value '{source_value}' to decimal for user {user_data.get('id')}")
+                return None
+        else:
+            # For string fields and others, use the value as-is
+            field_value = source_value
+        
+        # Create a minimal payload with only required fields
+        update_payload = {
+            'username': user_data.get('username'),
+            'departmentId': user_data.get('departmentId'),
+            'firstName': user_data.get('firstName'),
+            'lastName': user_data.get('lastName')
+        }
+        
+        # Set the destination field value in the minimal payload
+        set_nested_field_value(update_payload, destination_field, field_value)
+        
+        return update_payload
+        
+    except Exception as e:
+        logging.error(f"Error preparing user {user_data.get('id')} for batch: {str(e)}")
+        return None
+
+
 def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
                           source_field: str, destination_field: str,
                           dest_col_name: str, dry_run: bool, overwrite: bool,
                           allow_alpha: bool) -> tuple:
     """
-    Process a single user row: validate and update via API.
+    Validate a single user row and prepare it for batch update.
     
     Args:
-        client: Authenticated AbsorbLMSClient instance
+        client: Authenticated AbsorbLMSClient instance (not used in validation, kept for compatibility)
         row: CSV row dictionary for the user
         source_field: Name of the source field
         destination_field: Full path to the destination field
@@ -646,9 +764,10 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
         allow_alpha: If True, allow alphanumeric source values
         
     Returns:
-        Tuple of (status, result_type) where:
+        Tuple of (status, result_type, prepared_user_data) where:
         - status: New CSV status string or None for silent skips
-        - result_type: 'success', 'error', 'skip', or 'skip_blank'
+        - result_type: 'ready', 'skip', 'skip_blank', or 'error'
+        - prepared_user_data: Dictionary ready for batch upload or None
     """
     user_id = row['id']
     username = row['username']
@@ -660,7 +779,7 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
         user_data = json.loads(user_data_json)
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse user data for {username}: {e}")
-        return 'Failure', 'error'
+        return 'Failure', 'error', None
     
     # Check if source value is blank but destination field is set
     if not source_value and current_field_value:
@@ -668,11 +787,11 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
             f"Skipping user {username} (ID: {user_id}) - {source_field} is blank "
             f"but {destination_field} is set: {current_field_value}"
         )
-        return 'Different', 'skip'
+        return 'Different', 'skip', None
     
     # Skip users with blank source value
     if not source_value:
-        return None, 'skip_blank'
+        return None, 'skip_blank', None
     
     # Validate source value format if not allowing alphanumeric
     if not allow_alpha and not is_numeric_only(source_value):
@@ -680,7 +799,7 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
             f"Skipping user {username} (ID: {user_id}) - {source_field} "
             f"'{source_value}' is not numeric (use --alpha to allow alphanumeric)"
         )
-        return 'Wrong Format', 'skip'
+        return 'Wrong Format', 'skip', None
     
     # Check if we should skip this user based on overwrite flag
     current_field_int = parse_int_from_string(current_field_value)
@@ -691,20 +810,21 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
             f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, "
             f"Current {destination_field}: {current_field_value} (different values)"
         )
-        return 'Different', 'skip'
+        return 'Different', 'skip', None
     
     logging.info(f"Processing user {username} (ID: {user_id}) - {source_field}: {source_value}")
     
     if dry_run:
         logging.info(f"[DRY RUN] Would update {destination_field} to: {source_value}")
-        return 'Success', 'success'
+        return 'Success', 'ready', None  # Return None for prepared data in dry run
     else:
-        if client.update_user(user_data, source_value, destination_field):
-            logging.info(f"Successfully updated user {username}")
-            return 'Success', 'success'
+        # Prepare user data for batch update
+        prepared_user = _prepare_user_for_batch(user_data, source_value, destination_field)
+        if prepared_user:
+            return None, 'ready', prepared_user  # Status will be set after batch update
         else:
-            logging.error(f"Failed to update user {username}")
-            return 'Failure', 'error'
+            logging.error(f"Failed to prepare user {username} for batch update")
+            return 'Failure', 'error', None
 
 
 def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
@@ -932,54 +1052,62 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     progress_lock = threading.Lock()
     counters_lock = threading.Lock()
     
-    # Batch size balances memory usage (rows held in memory) vs thread pool efficiency.
-    # Using workers * 10 keeps the pool busy while limiting memory; minimum 100 avoids
-    # excessive overhead for small worker counts.
-    batch_size = max(workers * 10, 100)
+    # API batch size limit is 200 users per request
+    API_BATCH_SIZE = 200
     
-    def process_and_track(row):
-        """Process a single user and record result to progress file."""
-        status, result_type = _process_single_user(
+    def validate_and_prepare(row):
+        """Validate a single user and prepare for batch update."""
+        status, result_type, prepared_user = _process_single_user(
             client, row, source_field, destination_field,
             dest_col_name, dry_run, overwrite, allow_alpha
         )
-        if status:
-            _append_progress(progress_file, row['id'], status, progress_lock)
-        return status, result_type
+        return row, status, result_type, prepared_user
     
-    def collect_batch_results(futures):
-        """Collect results from a batch of futures, updating counters."""
-        nonlocal success_count, error_count, skip_count, processed_total
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                status, result_type = future.result()
-                with counters_lock:
-                    if result_type == 'success':
+    def submit_batch_update(users_batch_data):
+        """Submit a batch of users for update via API."""
+        nonlocal success_count, error_count
+        
+        # Extract just the prepared user payloads
+        prepared_users = [item['prepared_user'] for item in users_batch_data]
+        
+        logging.info(f"Submitting batch of {len(prepared_users)} users to API...")
+        
+        try:
+            # Call the batch update API
+            results = client.batch_update_users(prepared_users)
+            
+            # Process results and update progress
+            for item in users_batch_data:
+                row = item['row']
+                username = row['username']
+                user_id = row['id']
+                
+                if results.get(username, False):
+                    logging.info(f"Successfully updated user {username}")
+                    _append_progress(progress_file, user_id, 'Success', progress_lock)
+                    with counters_lock:
                         success_count += 1
-                    elif result_type == 'error':
+                else:
+                    logging.error(f"Failed to update user {username}")
+                    _append_progress(progress_file, user_id, 'Failure', progress_lock)
+                    with counters_lock:
                         error_count += 1
-                    elif result_type == 'skip':
-                        skip_count += 1
-                    processed_total += 1
-                    if processed_total % 100 == 0:
-                        logging.info(
-                            f"Progress: {processed_total}/{remaining_count} users processed"
-                        )
-            except Exception as e:
-                failed_row = futures[future]
-                logging.error(
-                    f"Unexpected error processing user {failed_row.get('id', 'unknown')}: {e}"
-                )
-                _append_progress(progress_file, failed_row['id'], 'Failure', progress_lock)
+        except Exception as e:
+            logging.error(f"Error submitting batch update: {e}")
+            # Mark all users in batch as failed
+            for item in users_batch_data:
+                row = item['row']
+                _append_progress(progress_file, row['id'], 'Failure', progress_lock)
                 with counters_lock:
                     error_count += 1
-                    processed_total += 1
     
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             with open(csv_file, 'r', newline='', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
-                batch = []
+                
+                # Collect rows to validate
+                rows_to_process = []
                 
                 for row in reader:
                     user_id = row['id']
@@ -1001,17 +1129,69 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                             skip_count += 1
                         continue
                     
-                    batch.append(row)
-                    
-                    if len(batch) >= batch_size:
-                        futures = {executor.submit(process_and_track, r): r for r in batch}
-                        collect_batch_results(futures)
-                        batch = []
+                    rows_to_process.append(row)
                 
-                # Process remaining rows in the last batch
-                if batch:
-                    futures = {executor.submit(process_and_track, r): r for r in batch}
-                    collect_batch_results(futures)
+                # Phase 1: Validate all users in parallel
+                logging.info(f"Validating {len(rows_to_process)} users...")
+                validation_futures = [executor.submit(validate_and_prepare, row) for row in rows_to_process]
+                
+                # Collect users that are ready for batch update
+                users_ready_for_update = []
+                
+                for future in concurrent.futures.as_completed(validation_futures):
+                    try:
+                        row, status, result_type, prepared_user = future.result()
+                        
+                        with counters_lock:
+                            processed_total += 1
+                            if processed_total % 100 == 0:
+                                logging.info(
+                                    f"Progress: {processed_total}/{len(rows_to_process)} users validated"
+                                )
+                        
+                        if result_type == 'ready':
+                            if dry_run:
+                                # In dry run, just count successes
+                                _append_progress(progress_file, row['id'], 'Success', progress_lock)
+                                with counters_lock:
+                                    success_count += 1
+                            else:
+                                # Collect for batch update
+                                users_ready_for_update.append({
+                                    'row': row,
+                                    'prepared_user': prepared_user
+                                })
+                        elif result_type in ['skip', 'skip_blank']:
+                            if status:  # Some skips have a status to record
+                                _append_progress(progress_file, row['id'], status, progress_lock)
+                            with counters_lock:
+                                skip_count += 1
+                        elif result_type == 'error':
+                            _append_progress(progress_file, row['id'], status, progress_lock)
+                            with counters_lock:
+                                error_count += 1
+                                
+                    except Exception as e:
+                        logging.error(f"Unexpected error during validation: {e}")
+                        with counters_lock:
+                            error_count += 1
+                
+                # Phase 2: Submit batch updates (not in dry run)
+                if not dry_run and users_ready_for_update:
+                    logging.info(f"Submitting {len(users_ready_for_update)} users in batches of {API_BATCH_SIZE}...")
+                    
+                    # Split into batches of API_BATCH_SIZE and submit with workers
+                    batch_futures = []
+                    for i in range(0, len(users_ready_for_update), API_BATCH_SIZE):
+                        batch = users_ready_for_update[i:i + API_BATCH_SIZE]
+                        batch_futures.append(executor.submit(submit_batch_update, batch))
+                    
+                    # Wait for all batch updates to complete
+                    for future in concurrent.futures.as_completed(batch_futures):
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logging.error(f"Batch update failed: {e}")
         
         # Merge progress into CSV after all processing
         _merge_progress_to_csv(csv_file, progress_file)
