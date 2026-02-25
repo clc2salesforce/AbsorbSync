@@ -452,6 +452,66 @@ class AbsorbLMSClient:
         except Exception as e:
             logging.error(f"Error updating user {user_id}: {str(e)}")
             return False
+    
+    def upload_users_batch(self, users_data: List[Dict[str, Any]]) -> Dict[str, bool]:
+        """
+        Upload a batch of users using the /users/upload/ endpoint.
+        
+        This method can handle up to 200 users per request.
+        
+        Args:
+            users_data: List of user dictionaries, each containing:
+                - username: User's username (required)
+                - departmentId: User's department ID (required)
+                - firstName: User's first name (required)
+                - lastName: User's last name (required)
+                - customFields: Dictionary of custom fields to update (optional)
+                
+        Returns:
+            Dictionary mapping user IDs to success status (True/False).
+            For successful updates, the key is the user ID from the response.
+        """
+        url = f"{self.api_url}/users/upload/"
+        
+        try:
+            # The payload should be a list of user objects
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            response = self._retry_request(
+                'POST',
+                url,
+                headers=headers,
+                json=users_data
+            )
+            
+            if response.status_code in [200, 201]:
+                # Success response is a list of {key: userId, value: username}
+                result_data = response.json()
+                
+                # Create a mapping of username to userId for successful updates
+                success_map = {}
+                if isinstance(result_data, list):
+                    for item in result_data:
+                        if isinstance(item, dict) and 'key' in item and 'value' in item:
+                            user_id = item['key']
+                            username = item['value']
+                            success_map[user_id] = True
+                            logging.debug(f"User {username} (ID: {user_id}) uploaded successfully")
+                
+                return success_map
+            else:
+                logging.error(
+                    f"Failed to upload batch of {len(users_data)} users: "
+                    f"{response.status_code} - {response.text}"
+                )
+                # Return empty dict indicating all failed
+                return {}
+                
+        except Exception as e:
+            logging.error(f"Error uploading user batch: {str(e)}")
+            return {}
 
 
 def get_nested_field_value(data: Dict[str, Any], field_path: str) -> str:
@@ -707,6 +767,164 @@ def _process_single_user(client: AbsorbLMSClient, row: Dict[str, str],
             return 'Failure', 'error'
 
 
+def _prepare_user_for_batch(row: Dict[str, str], source_field: str, destination_field: str,
+                            dest_col_name: str, overwrite: bool, allow_alpha: bool) -> tuple:
+    """
+    Prepare a single user for batch upload by validating and creating the payload.
+    
+    Args:
+        row: CSV row dictionary for the user
+        source_field: Name of the source field
+        destination_field: Full path to the destination field
+        dest_col_name: CSV column name for the current destination field value
+        overwrite: If True, update even if destination field has a different value
+        allow_alpha: If True, allow alphanumeric source values
+        
+    Returns:
+        Tuple of (user_payload, status, result_type) where:
+        - user_payload: Dictionary ready for batch upload, or None if user should be skipped
+        - status: New CSV status string or None for silent skips
+        - result_type: 'success', 'error', 'skip', or 'skip_blank'
+    """
+    user_id = row['id']
+    username = row['username']
+    source_value = row[source_field]
+    current_field_value = row.get(dest_col_name, '')
+    user_data_json = row['user_data_json']
+    
+    try:
+        user_data = json.loads(user_data_json)
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse user data for {username}: {e}")
+        return None, 'Failure', 'error'
+    
+    # Check if source value is blank but destination field is set
+    if not source_value and current_field_value:
+        logging.info(
+            f"Skipping user {username} (ID: {user_id}) - {source_field} is blank "
+            f"but {destination_field} is set: {current_field_value}"
+        )
+        return None, 'Different', 'skip'
+    
+    # Skip users with blank source value
+    if not source_value:
+        return None, None, 'skip_blank'
+    
+    # Validate source value format if not allowing alphanumeric
+    if not allow_alpha and not is_numeric_only(source_value):
+        logging.info(
+            f"Skipping user {username} (ID: {user_id}) - {source_field} "
+            f"'{source_value}' is not numeric (use --alpha to allow alphanumeric)"
+        )
+        return None, 'Wrong Format', 'skip'
+    
+    # Check if we should skip this user based on overwrite flag
+    current_field_int = parse_int_from_string(current_field_value)
+    source_value_int = parse_int_from_string(source_value)
+    
+    if not overwrite and current_field_int is not None and current_field_int != source_value_int:
+        logging.info(
+            f"Skipping user {username} (ID: {user_id}) - {source_field}: {source_value}, "
+            f"Current {destination_field}: {current_field_value} (different values)"
+        )
+        return None, 'Different', 'skip'
+    
+    # Determine the appropriate value type based on the destination field name
+    field_name = destination_field.split('.')[-1] if '.' in destination_field else destination_field
+    if field_name.startswith('decimal'):
+        try:
+            field_value = float(source_value)
+        except (ValueError, TypeError):
+            logging.warning(f"Cannot convert source value '{source_value}' to decimal for user {user_id}")
+            return None, 'Failure', 'error'
+    else:
+        # For string fields and others, use the value as-is
+        field_value = source_value
+    
+    # Create the user payload for batch upload
+    user_payload = {
+        'username': user_data.get('username'),
+        'departmentId': user_data.get('departmentId'),
+        'firstName': user_data.get('firstName'),
+        'lastName': user_data.get('lastName')
+    }
+    
+    # Set the destination field value in the payload
+    set_nested_field_value(user_payload, destination_field, field_value)
+    
+    logging.info(f"Preparing user {username} (ID: {user_id}) - {source_field}: {source_value}")
+    
+    return user_payload, 'Success', 'success'
+
+
+def _process_user_batch(client: AbsorbLMSClient, batch_rows: List[Dict[str, str]],
+                       source_field: str, destination_field: str,
+                       dest_col_name: str, dry_run: bool, overwrite: bool,
+                       allow_alpha: bool) -> List[tuple]:
+    """
+    Process a batch of users by uploading them via the batch upload endpoint.
+    
+    Args:
+        client: Authenticated AbsorbLMSClient instance
+        batch_rows: List of CSV row dictionaries for the users
+        source_field: Name of the source field
+        destination_field: Full path to the destination field
+        dest_col_name: CSV column name for the current destination field value
+        dry_run: If True, simulate the update
+        overwrite: If True, update even if destination field has a different value
+        allow_alpha: If True, allow alphanumeric source values
+        
+    Returns:
+        List of tuples (user_id, status, result_type) for each user in the batch
+    """
+    results = []
+    users_to_upload = []
+    user_id_map = {}  # Map username to (user_id, row_index)
+    
+    # Prepare all users in the batch
+    for idx, row in enumerate(batch_rows):
+        user_id = row['id']
+        username = row['username']
+        
+        user_payload, status, result_type = _prepare_user_for_batch(
+            row, source_field, destination_field, dest_col_name, overwrite, allow_alpha
+        )
+        
+        if user_payload is None:
+            # User should be skipped - add to results with status
+            results.append((user_id, status, result_type))
+        else:
+            # User ready for upload
+            users_to_upload.append(user_payload)
+            user_id_map[username] = (user_id, idx)
+    
+    # If no users to upload, return results
+    if not users_to_upload:
+        return results
+    
+    # In dry-run mode, just mark all as success
+    if dry_run:
+        for username, (user_id, idx) in user_id_map.items():
+            logging.info(f"[DRY RUN] Would update {destination_field} for user {username}")
+            results.append((user_id, 'Success', 'success'))
+        return results
+    
+    # Upload the batch
+    logging.info(f"Uploading batch of {len(users_to_upload)} users...")
+    success_map = client.upload_users_batch(users_to_upload)
+    
+    # Process results
+    for username, (user_id, idx) in user_id_map.items():
+        if user_id in success_map and success_map[user_id]:
+            logging.info(f"Successfully updated user {username}")
+            results.append((user_id, 'Success', 'success'))
+        else:
+            logging.error(f"Failed to update user {username}")
+            results.append((user_id, 'Failure', 'error'))
+    
+    return results
+
+
 def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
     """
     Load secrets from a text file.
@@ -923,8 +1141,8 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             logging.info("\nUpdate cancelled by user")
             return 0, 0, 0
     
-    # Process users with parallel workers
-    logging.info(f"\nProcessing users with {workers} parallel worker(s)...")
+    # Process users with batch uploads (up to 200 users per request)
+    logging.info(f"\nProcessing users with batch uploads (up to 200 users per batch)...")
     success_count = 0
     error_count = 0
     skip_count = 0
@@ -932,86 +1150,77 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     progress_lock = threading.Lock()
     counters_lock = threading.Lock()
     
-    # Batch size balances memory usage (rows held in memory) vs thread pool efficiency.
-    # Using workers * 10 keeps the pool busy while limiting memory; minimum 100 avoids
-    # excessive overhead for small worker counts.
-    batch_size = max(workers * 10, 100)
+    # Batch size for API upload (max 200 per request)
+    api_batch_size = 200
     
-    def process_and_track(row):
-        """Process a single user and record result to progress file."""
-        status, result_type = _process_single_user(
-            client, row, source_field, destination_field,
+    def process_batch_and_track(batch_rows):
+        """Process a batch of users and record results to progress file."""
+        results = _process_user_batch(
+            client, batch_rows, source_field, destination_field,
             dest_col_name, dry_run, overwrite, allow_alpha
         )
-        if status:
-            _append_progress(progress_file, row['id'], status, progress_lock)
-        return status, result_type
+        
+        # Record all results to progress file
+        for user_id, status, result_type in results:
+            if status:
+                _append_progress(progress_file, user_id, status, progress_lock)
+        
+        return results
     
-    def collect_batch_results(futures):
-        """Collect results from a batch of futures, updating counters."""
+    def collect_batch_results(results):
+        """Collect results from a batch of users, updating counters."""
         nonlocal success_count, error_count, skip_count, processed_total
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                status, result_type = future.result()
-                with counters_lock:
-                    if result_type == 'success':
-                        success_count += 1
-                    elif result_type == 'error':
-                        error_count += 1
-                    elif result_type == 'skip':
-                        skip_count += 1
-                    processed_total += 1
-                    if processed_total % 100 == 0:
-                        logging.info(
-                            f"Progress: {processed_total}/{remaining_count} users processed"
-                        )
-            except Exception as e:
-                failed_row = futures[future]
-                logging.error(
-                    f"Unexpected error processing user {failed_row.get('id', 'unknown')}: {e}"
-                )
-                _append_progress(progress_file, failed_row['id'], 'Failure', progress_lock)
-                with counters_lock:
+        for user_id, status, result_type in results:
+            with counters_lock:
+                if result_type == 'success':
+                    success_count += 1
+                elif result_type == 'error':
                     error_count += 1
-                    processed_total += 1
+                elif result_type == 'skip':
+                    skip_count += 1
+                processed_total += 1
+                if processed_total % 100 == 0:
+                    logging.info(
+                        f"Progress: {processed_total}/{remaining_count} users processed"
+                    )
     
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            with open(csv_file, 'r', newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                batch = []
+        with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            batch = []
+            
+            for row in reader:
+                user_id = row['id']
                 
-                for row in reader:
-                    user_id = row['id']
-                    
-                    # Skip rows already completed in progress file (terminal statuses)
-                    if user_id in completed and completed[user_id] in TERMINAL_STATUSES:
-                        status = completed[user_id]
-                        if status == 'Success':
-                            success_count += 1
-                        else:
-                            skip_count += 1
-                        continue
-                    
-                    # Skip rows with terminal status already in CSV
-                    if row['Status'] in TERMINAL_STATUSES:
-                        if row['Status'] == 'Success':
-                            success_count += 1
-                        else:
-                            skip_count += 1
-                        continue
-                    
-                    batch.append(row)
-                    
-                    if len(batch) >= batch_size:
-                        futures = {executor.submit(process_and_track, r): r for r in batch}
-                        collect_batch_results(futures)
-                        batch = []
+                # Skip rows already completed in progress file (terminal statuses)
+                if user_id in completed and completed[user_id] in TERMINAL_STATUSES:
+                    status = completed[user_id]
+                    if status == 'Success':
+                        success_count += 1
+                    else:
+                        skip_count += 1
+                    continue
                 
-                # Process remaining rows in the last batch
-                if batch:
-                    futures = {executor.submit(process_and_track, r): r for r in batch}
-                    collect_batch_results(futures)
+                # Skip rows with terminal status already in CSV
+                if row['Status'] in TERMINAL_STATUSES:
+                    if row['Status'] == 'Success':
+                        success_count += 1
+                    else:
+                        skip_count += 1
+                    continue
+                
+                batch.append(row)
+                
+                # Process batch when it reaches the API limit
+                if len(batch) >= api_batch_size:
+                    results = process_batch_and_track(batch)
+                    collect_batch_results(results)
+                    batch = []
+            
+            # Process remaining rows in the last batch
+            if batch:
+                results = process_batch_and_track(batch)
+                collect_batch_results(results)
         
         # Merge progress into CSV after all processing
         _merge_progress_to_csv(csv_file, progress_file)
