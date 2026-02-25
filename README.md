@@ -41,8 +41,7 @@ Synchronize user data between fields in Absorb LMS. Syncs from a source field (d
 - **Parallel API requests** with configurable `--workers` for concurrent processing
 - **Thread-safe token management**: token generated once, automatically refreshed on expiry
 - Exponential backoff retry logic for transient failures (429, 5xx errors)
-- Supports 200 requests per second (no artificial delays)
-- Proper pagination with page-based offsets
+- Pagination with page-based offsets
 
 ### Fault Tolerance and Resume
 - **Crash-safe progress tracking** via append-only progress file
