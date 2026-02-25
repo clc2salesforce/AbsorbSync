@@ -108,6 +108,7 @@ class AbsorbLMSClient:
         
         try:
             logging.info("Authenticating with Absorb LMS REST API v2...")
+            tqdm.write("Authenticating with Absorb LMS REST API v2...")
             response = self._retry_request(
                 method='POST',
                 url=auth_url,
@@ -125,6 +126,7 @@ class AbsorbLMSClient:
                     })
                     self._token_version += 1
                     logging.info("Authentication successful")
+                    tqdm.write("Authentication successful")
                     return True
                 else:
                     logging.error("Empty token received from authentication endpoint")
@@ -344,6 +346,9 @@ class AbsorbLMSClient:
                             total_pages = (total_items + page_size - 1) // page_size  # Ceiling division
                             logging.info(f"Total users to retrieve: {total_items}")
                             logging.info(f"Will download in {total_pages} batches of {page_size}")
+                            # Write to console using tqdm.write to avoid interfering with progress bar
+                            tqdm.write(f"Total users to retrieve: {total_items}")
+                            tqdm.write(f"Will download in {total_pages} batches of {page_size}")
                             # Create progress bar for console
                             pbar = tqdm(total=total_pages, desc="Downloading", unit="batch", 
                                       position=0, leave=True, file=sys.stdout, 
@@ -409,6 +414,7 @@ class AbsorbLMSClient:
                 pbar.close()
         
         logging.info(f"Total users with {source_field} saved to CSV: {users_with_source_field}")
+        tqdm.write(f"Total users with {source_field} saved to CSV: {users_with_source_field}")
         return users_with_source_field
     
     def update_user(self, user_data: Dict[str, Any], source_value: str, destination_field: str) -> bool:
@@ -901,27 +907,37 @@ def load_secrets(secrets_file: str = 'secrets.txt') -> Dict[str, str]:
 
 def setup_logging(log_file: str = None) -> None:
     """
-    Set up logging configuration.
+    Set up logging configuration with separate console and file handlers.
+    
+    Console handler only shows WARNING and above (errors) to avoid cluttering
+    the console during progress bar display. File handler captures all INFO
+    messages for detailed auditing.
     
     Args:
         log_file: Path to log file (optional)
     """
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
     
-    handlers = [logging.StreamHandler(sys.stdout)]
+    # Create root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
     
+    # Console handler - only WARNING and above (to not interfere with progress bars)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(console_handler)
+    
+    # File handler - all INFO and above
     if log_file:
         # Create logs directory if it doesn't exist
         log_dir = os.path.dirname(log_file)
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir)
-        handlers.append(logging.FileHandler(log_file))
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format=log_format,
-        handlers=handlers
-    )
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        logger.addHandler(file_handler)
 
 
 def parse_int_from_string(value: str) -> Optional[int]:
@@ -1020,8 +1036,10 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
             users_count = sum(1 for _ in reader)
         
         logging.info(f"Found {users_count} users in CSV file")
+        tqdm.write(f"Found {users_count} users in CSV file")
     else:
         logging.info("Fetching users from Absorb LMS...")
+        tqdm.write("Fetching users from Absorb LMS...")
         users_count = client.get_users_incremental(page_size=500, csv_file=csv_file, filter_blank=filter_blank, department_id=department_id, destination_field=destination_field, source_field=source_field)
     
     if users_count == 0:
@@ -1033,6 +1051,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     completed = _load_progress(progress_file)
     if completed:
         logging.info(f"Resuming: found {len(completed)} previously processed users in progress file")
+        tqdm.write(f"Resuming: found {len(completed)} previously processed users in progress file")
     
     # Count remaining rows to process
     dest_col_name = f'current_{sanitize_field_path_for_csv(destination_field)}'
@@ -1049,6 +1068,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     
     if remaining_count == 0:
         logging.info("All users have already been processed.")
+        tqdm.write("All users have already been processed.")
         if completed:
             _merge_progress_to_csv(csv_file, progress_file)
         return 0, 0, 0
@@ -1057,19 +1077,26 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     logging.info("\n" + "="*60)
     logging.info(f"Ready to process {remaining_count} users ({users_count} total in CSV)")
     logging.info("="*60)
+    # Write to console
+    tqdm.write("\n" + "="*60)
+    tqdm.write(f"Ready to process {remaining_count} users ({users_count} total in CSV)")
+    tqdm.write("="*60)
     
     if not dry_run:
         try:
             confirmation = input(f"\nDo you want to proceed with updating {remaining_count} users? (yes/y/no): ")
             if confirmation.lower() not in ['yes', 'y']:
                 logging.info("Update cancelled by user")
+                tqdm.write("Update cancelled by user")
                 return 0, 0, 0
         except (EOFError, KeyboardInterrupt):
             logging.info("\nUpdate cancelled by user")
+            tqdm.write("\nUpdate cancelled by user")
             return 0, 0, 0
     
     # Process users with parallel workers
     logging.info(f"\nProcessing users with {workers} parallel worker(s)...")
+    tqdm.write(f"\nProcessing users with {workers} parallel worker(s)...")
     success_count = 0
     error_count = 0
     skip_count = 0
@@ -1161,6 +1188,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 
                 # Phase 1: Validate all users in parallel
                 logging.info(f"Validating {len(rows_to_process)} users...")
+                tqdm.write(f"Validating {len(rows_to_process)} users...")
                 validation_futures = [executor.submit(validate_and_prepare, row) for row in rows_to_process]
                 
                 # Collect users that are ready for batch update
@@ -1219,6 +1247,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 # Phase 2: Submit batch updates (not in dry run)
                 if not dry_run and users_ready_for_update:
                     logging.info(f"Submitting {len(users_ready_for_update)} users in batches of {API_BATCH_SIZE}...")
+                    tqdm.write(f"Submitting {len(users_ready_for_update)} users in batches of {API_BATCH_SIZE}...")
                     
                     # Split into batches of API_BATCH_SIZE and submit with workers
                     batch_futures = []
@@ -1259,6 +1288,15 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
     logging.info(f"Skipped (different values): {skip_count}")
     logging.info(f"Errors: {error_count}")
     logging.info(f"{'='*60}\n")
+    
+    # Write summary to console
+    tqdm.write(f"\n{'='*60}")
+    tqdm.write(f"Sync completed!")
+    tqdm.write(f"Total users processed: {success_count + error_count + skip_count}")
+    tqdm.write(f"Successful updates: {success_count}")
+    tqdm.write(f"Skipped (different values): {skip_count}")
+    tqdm.write(f"Errors: {error_count}")
+    tqdm.write(f"{'='*60}\n")
     
     return success_count, error_count, skip_count
 
@@ -1468,6 +1506,10 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
     logging.info("="*60)
     logging.info("Absorb LMS Field Sync")
     logging.info("="*60)
+    # Write to console
+    tqdm.write("="*60)
+    tqdm.write("Absorb LMS Field Sync")
+    tqdm.write("="*60)
     
     try:
         # Determine CSV file path
@@ -1478,10 +1520,12 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
         # Authentication is needed for both download and update operations
         # (even with --file, updates require API calls)
         logging.info(f"Loading secrets from {args.secrets}...")
+        tqdm.write(f"Loading secrets from {args.secrets}...")
         secrets = load_secrets(args.secrets)
         
         # Initialize client
         logging.info("Initializing Absorb LMS client...")
+        tqdm.write("Initializing Absorb LMS client...")
         client = AbsorbLMSClient(
             api_url=secrets['ABSORB_API_URL'],
             api_key=secrets['ABSORB_API_KEY'],
@@ -1492,6 +1536,7 @@ For more information, see README.md or visit https://github.com/clc2salesforce/A
         
         # Authenticate
         logging.info("Authenticating with Absorb LMS...")
+        tqdm.write("Authenticating with Absorb LMS...")
         if not client.authenticate():
             logging.error("Authentication failed. Exiting.")
             sys.exit(1)
