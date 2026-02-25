@@ -390,8 +390,11 @@ class AbsorbLMSClient:
         """
         Update a user's destination field with the source field value.
         
+        Only sends username, departmentId, firstName, lastName, and the updated 
+        destination field to the API (minimal payload).
+        
         Args:
-            user_data: Complete user data dictionary
+            user_data: Complete user data dictionary (used to extract required fields)
             source_value: Source field value to set in the destination field
             destination_field: Full path to the destination field (e.g., 'customFields.decimal1', 'externalId')
             
@@ -415,10 +418,19 @@ class AbsorbLMSClient:
                 # For string fields and others, use the value as-is
                 field_value = source_value
             
-            # Set the destination field value using the helper function
-            set_nested_field_value(user_data, destination_field, field_value)
+            # Create a minimal payload with only required fields
+            # Only PUT back username, departmentId, firstName, lastName, and the updated destination field
+            update_payload = {
+                'username': user_data.get('username'),
+                'departmentId': user_data.get('departmentId'),
+                'firstName': user_data.get('firstName'),
+                'lastName': user_data.get('lastName')
+            }
             
-            # PUT the entire user profile back
+            # Set the destination field value in the minimal payload
+            set_nested_field_value(update_payload, destination_field, field_value)
+            
+            # PUT only the required fields back
             headers = {
                 "Content-Type": "application/json"
             }
@@ -426,7 +438,7 @@ class AbsorbLMSClient:
                 'PUT',
                 url,
                 headers=headers,
-                json=user_data
+                json=update_payload
             )
             
             if response.status_code in [200, 201, 204]:
