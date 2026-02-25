@@ -34,6 +34,12 @@ except ImportError:
     print("Error: 'requests' module not found. Install it with: pip install -r requirements.txt")
     sys.exit(1)
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    print("Error: 'tqdm' module not found. Install it with: pip install -r requirements.txt")
+    sys.exit(1)
+
 
 class AbsorbLMSClient:
     """Client for interacting with Absorb LMS API."""
@@ -300,6 +306,9 @@ class AbsorbLMSClient:
             writer = csv.writer(f)
             writer.writerow(['Status', 'id', 'username', source_field, dest_col_name, 'user_data_json'])
             
+            # Progress bar will be created after we know total_pages
+            pbar = None
+            
             while True:
                 url = f"{self.api_url}/users"
                 params = {
@@ -335,6 +344,10 @@ class AbsorbLMSClient:
                             total_pages = (total_items + page_size - 1) // page_size  # Ceiling division
                             logging.info(f"Total users to retrieve: {total_items}")
                             logging.info(f"Will download in {total_pages} batches of {page_size}")
+                            # Create progress bar for console
+                            pbar = tqdm(total=total_pages, desc="Downloading", unit="batch", 
+                                      position=0, leave=True, file=sys.stdout, 
+                                      bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} batches')
                         
                         # The API returns 'users' (lowercase)
                         page_users = data.get('users', [])
@@ -367,7 +380,11 @@ class AbsorbLMSClient:
                         f.flush()
                         
                         current_batch = page + 1
+                        # Log to file only (console will show progress bar)
                         logging.info(f"Downloading user batch {current_batch} of {total_pages} ({len(page_users)} users, {batch_count} with {source_field})")
+                        # Update progress bar for console
+                        if pbar:
+                            pbar.update(1)
                         
                         page += 1  # Increment page number by 1
                         
@@ -377,11 +394,19 @@ class AbsorbLMSClient:
                     else:
                         error_msg = f"Failed to retrieve users: {response.status_code} - {response.text}"
                         logging.error(error_msg)
+                        if pbar:
+                            pbar.close()
                         raise RuntimeError(error_msg)
                         
                 except Exception as e:
                     logging.error(f"Error retrieving users: {str(e)}")
+                    if pbar:
+                        pbar.close()
                     raise
+            
+            # Close progress bar
+            if pbar:
+                pbar.close()
         
         logging.info(f"Total users with {source_field} saved to CSV: {users_with_source_field}")
         return users_with_source_field
@@ -1070,6 +1095,7 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
         # Extract just the prepared user payloads
         prepared_users = [item['prepared_user'] for item in users_batch_data]
         
+        # Log to file only (not console during progress bar)
         logging.info(f"Submitting batch of {len(prepared_users)} users to API...")
         
         try:
@@ -1083,11 +1109,13 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 user_id = row['id']
                 
                 if results.get(username, False):
+                    # Log to file only (not console during progress bar)
                     logging.info(f"Successfully updated user {username}")
                     _append_progress(progress_file, user_id, 'Success', progress_lock)
                     with counters_lock:
                         success_count += 1
                 else:
+                    # Log to file only (not console during progress bar)
                     logging.error(f"Failed to update user {username}")
                     _append_progress(progress_file, user_id, 'Failure', progress_lock)
                     with counters_lock:
@@ -1138,16 +1166,24 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                 # Collect users that are ready for batch update
                 users_ready_for_update = []
                 
+                # Create progress bar for validation on console
+                validation_pbar = tqdm(total=len(rows_to_process), desc="Validating", unit="user",
+                                     position=0, leave=True, file=sys.stdout)
+                
                 for future in concurrent.futures.as_completed(validation_futures):
                     try:
                         row, status, result_type, prepared_user = future.result()
                         
                         with counters_lock:
                             processed_total += 1
+                            # Log to file only (every 100 users)
                             if processed_total % 100 == 0:
                                 logging.info(
                                     f"Progress: {processed_total}/{len(rows_to_process)} users validated"
                                 )
+                        
+                        # Update console progress bar
+                        validation_pbar.update(1)
                         
                         if result_type == 'ready':
                             if dry_run:
@@ -1173,8 +1209,12 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                                 
                     except Exception as e:
                         logging.error(f"Unexpected error during validation: {e}")
+                        validation_pbar.update(1)
                         with counters_lock:
                             error_count += 1
+                
+                # Close validation progress bar
+                validation_pbar.close()
                 
                 # Phase 2: Submit batch updates (not in dry run)
                 if not dry_run and users_ready_for_update:
@@ -1182,6 +1222,12 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     
                     # Split into batches of API_BATCH_SIZE and submit with workers
                     batch_futures = []
+                    num_batches = (len(users_ready_for_update) + API_BATCH_SIZE - 1) // API_BATCH_SIZE
+                    
+                    # Create progress bar for batch submissions on console
+                    batch_pbar = tqdm(total=num_batches, desc="Submitting", unit="batch",
+                                    position=0, leave=True, file=sys.stdout)
+                    
                     for i in range(0, len(users_ready_for_update), API_BATCH_SIZE):
                         batch = users_ready_for_update[i:i + API_BATCH_SIZE]
                         batch_futures.append(executor.submit(submit_batch_update, batch))
@@ -1190,8 +1236,13 @@ def sync_external_ids(client: AbsorbLMSClient, dry_run: bool = False, csv_file: 
                     for future in concurrent.futures.as_completed(batch_futures):
                         try:
                             future.result()
+                            batch_pbar.update(1)
                         except Exception as e:
                             logging.error(f"Batch update failed: {e}")
+                            batch_pbar.update(1)
+                    
+                    # Close batch progress bar
+                    batch_pbar.close()
         
         # Merge progress into CSV after all processing
         _merge_progress_to_csv(csv_file, progress_file)
