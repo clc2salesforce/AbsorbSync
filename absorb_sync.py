@@ -922,6 +922,12 @@ def setup_logging(log_file: str = None) -> None:
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     
+    # Suppress urllib3 connection pool warnings
+    # These warnings occur when using multiple workers and are not indicative of problems
+    # Connection pool warnings like "Connection pool is full, discarding connection"
+    # are benign - urllib3 simply discards old connections when the pool fills up
+    logging.getLogger('urllib3.connectionpool').setLevel(logging.ERROR)
+    
     # Console handler - only WARNING and above (to not interfere with progress bars)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.WARNING)
