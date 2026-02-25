@@ -356,6 +356,10 @@ class AbsorbLMSClient:
                             # Get current destination field value
                             current_dest_value = get_nested_field_value(user, destination_field)
                             
+                            # Blank password field to prevent overwriting with asterisks
+                            if 'password' in user:
+                                user['password'] = ''
+                            
                             # Store entire user data as JSON for PUT later
                             user_data_json = json.dumps(user)
                             
