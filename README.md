@@ -39,7 +39,6 @@ Synchronize user data between fields in Absorb LMS. Syncs from a source field (d
 - Absorb LMS REST API v2 authentication
 - **Batch updates**: Uses POST `/users/upload/` endpoint to update up to 200 users per request
 - **Parallel API requests** with configurable `--workers` for concurrent processing
-- **Thread-safe token management**: token generated once, automatically refreshed on expiry
 - Exponential backoff retry logic for transient failures (429, 5xx errors)
 - Pagination with page-based offsets
 
@@ -48,19 +47,12 @@ Synchronize user data between fields in Absorb LMS. Syncs from a source field (d
 - **Automatic resume**: re-run with `--file` to continue from where a previous run stopped
 - Failed rows (status: Failure) are automatically retried on resume
 - Successfully processed rows (Success, Different, Wrong Format) are skipped on resume
-- Scales to **millions of rows** with memory-efficient batch processing
 
 ### Filtering and Validation
 - Filter by department ID
 - Filter for blank custom field values only (e.g., blank `decimal1`)
-- Numeric-only validation for source field values (with `--alpha` option for alphanumeric)
+- Numeric-only validation for source field values (`--alpha` flag required to enable alphanumeric)
 - Skip or overwrite existing values
-- Handles blank source field values gracefully
-
-### Observability
-- Timestamped file logging plus console output
-- Debug mode for troubleshooting (prints sensitive data)
-- Comprehensive status tracking in CSV files
 
 ## Installation
 
@@ -132,7 +124,7 @@ python absorb_sync.py --help
 - `--update` - Actually perform updates (default is dry-run mode)
 - `--dry-run` - Explicitly enable dry-run mode (no changes made, this is the default)
 - `--file FILE` - Process existing CSV file instead of downloading from API. Automatically resumes from where a previous run left off.
-- `--workers N` - Number of parallel workers for concurrent API requests (default: 1). Recommended: 5-20 depending on API rate limits.
+- `--workers N` - Number of parallel workers for concurrent API requests (default: 1). Tested with up to 50.
 
 #### Filtering Options
 - `--blank` - Filter to only users with null/empty destination field
@@ -190,8 +182,6 @@ python absorb_sync.py --customField decimal1 --department c458459d-2f86-4c66-a48
 # Combine filters: blank custom field in specific department
 python absorb_sync.py --customField decimal1 --blank --department c458459d-2f86-4c66-a481-e17e6983f7ee --update
 
-# Only update users with blank string1 field
-python absorb_sync.py --customField string1 --blank --update
 ```
 
 #### Validation Examples
@@ -229,14 +219,6 @@ python absorb_sync.py \
   --blank \
   --alpha \
   --overwrite \
-  --update
-
-# Sync to string2 field with alphanumeric values for specific department
-python absorb_sync.py \
-  --customField string2 \
-  --department c458459d-2f86-4c66-a481-e17e6983f7ee \
-  --blank \
-  --alpha \
   --update
 
 # Sync email addresses to a custom string field
@@ -351,21 +333,15 @@ users_20260219_123456.csv
 - **Status** - Processing status (Retrieved, Success, Failure, Different, Wrong Format)
 - **id** - User UUID
 - **username** - Username
-- **Source field column** - The column name matches the source field specified with `--sourceField`. For example:
-  - If using `--sourceField externalId` (default), the column is named `externalId`
-  - If using `--sourceField username`, the column is named `username`
-  - If using `--sourceField customFields.string1`, the column is named `customFields.string1`
-- **Destination field column** - The column name follows the pattern `current_{sanitized_field_path}` where dots are replaced with underscores. For example:
-  - If using `--customField decimal1` (default), which becomes `customFields.decimal1`, the column is named `current_customFields_decimal1`
-  - If using `--destinationField externalId`, the column is named `current_externalId`
-  - If using `--destinationField customFields.string1`, the column is named `current_customFields_string1`
-- **user_data_json** - Complete user profile as JSON (needed for batch updates)
+- **Source field column** - The column name matches the source field specified with `--sourceField`.
+- **Destination field column** - The column name follows the pattern `current_{sanitized_field_path}` where dots are replaced with underscores.
+- **user_data_json** - Complete user profile as JSON
 
 ### Incremental Updates
 
-- CSV is written **incrementally after each batch** during download (with disk flush)
-- Status column is updated **after each user** during processing (with disk flush)
-- If the script fails, the CSV shows exactly where it stopped
+- CSV is written **incrementally after each batch** during download
+- Status column is updated **after each user** during processing
+- If the script fails, the CSV shows where it left off
 
 ### Reprocessing CSV Files
 
@@ -381,9 +357,8 @@ This skips the download phase and processes users from the CSV file.
 
 ### Log Files
 
-Logs are written to both:
-- **Console** (stdout) - Real-time progress
-- **Log file** - Persistent audit trail
+- **Console** - Real-time progress bar
+- **Log file** - Full logs
 
 Default log file location: `logs/absorb_sync_YYYYMMDD_HHMMSS.log`
 
@@ -419,43 +394,28 @@ python absorb_sync.py --debug --dry-run
 ### Parallel Processing
 
 - Use `--workers N` to enable concurrent API requests (default: 1 for sequential)
-- **Batch updates**: Up to 200 users per API request using POST `/users/upload/` endpoint
-- Validation phase runs in parallel with all workers
-- Batch submission phase groups validated users into batches of 200
-- Memory-efficient: only the current batch is held in memory at a time
-- Recommended: start with `--workers 5` and increase based on API rate limits
 
 ### Thread-Safe Token Management
 
 - Authentication token is generated **once** at startup
 - Token is automatically refreshed if it expires during a long-running operation
-- Thread-safe: if multiple workers detect an expired token, only one re-authenticates
-- Other workers wait for the new token and retry their requests
 
 ### High Performance
 
-- **Batch API calls**: Up to 200 users updated per request, significantly reducing API overhead
-- **No artificial delays** between successful API requests
-- Only exponential backoff on failures (429, 5xx errors)
-- Supports Absorb API's **200 requests per second** limit
+- **Batch API calls**: Up to 200 users updated per request, tested with 50 concurrent requests
 - Default page size: **500 users per batch** during download
 
 ### Fault Tolerance
 
 **Progress Tracking:**
-- A `.progress` file is maintained alongside the CSV during processing
-- Progress is written after each individual user completes (append-only for crash safety)
-- If the script crashes, the progress file preserves all completed work
+- Progress is written after each individual user completes
+- If the script crashes, the progress file indicates where the process left off
 
 **Resume Capability:**
 - Use `--file` flag to resume from where a previous run stopped
 - Rows with terminal statuses (Success, Different, Wrong Format) are skipped
 - Rows that previously failed (Failure) are automatically retried
 - Example: `python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update`
-
-**Incremental CSV Writing:**
-- CSV flushed to disk after each batch during download
-- After all processing completes, progress is merged back into the CSV
 
 **Exponential Backoff:**
 - Automatic retry for transient failures
@@ -475,86 +435,7 @@ Before processing updates, the script:
 
 ### Credentials Management
 
-- API credentials stored in separate `secrets.txt` file
-- Secrets file excluded from version control via `.gitignore`
-- Use `secrets.txt.example` as a template (safe to commit)
-
-### API Authentication
-
-The script implements Absorb LMS REST API v2 authentication:
-
-1. POST to `/authenticate` endpoint with:
-   - `username`
-   - `password`
-   - `privateKey` (same value as API key)
-2. Receive authentication token
-3. Use token in `Authorization` header for subsequent requests
-4. Include `x-api-key` header on all requests
-
-### Best Practices
-
-- Never commit `secrets.txt` to version control
-- Use `--debug` only in sandbox environments
-- Rotate API credentials regularly
-- Use dry-run mode before production updates
-- Review CSV files before confirming updates
-
-## Troubleshooting
-
-### Authentication Errors
-
-**Error:** "Invalid API key"
-
-**Solution:**
-- Verify `ABSORB_API_KEY` in `secrets.txt` is correct
-- Ensure you're using the correct API URL (sandbox vs production)
-- Check that all four credentials are provided
-
-### No Users Found
-
-**Error:** "Found 0 users"
-
-**Solution:**
-- Check your filter criteria (--blank, --department)
-- Verify users exist matching your filters
-- Try without filters to see all users
-- Use `--debug` to see API responses
-
-### Wrong Format Errors
-
-**Error:** Many users marked as "Wrong Format"
-
-**Solution:**
-- Source field values contain non-numeric characters
-- Use `--alpha` flag to allow alphanumeric values:
-  ```bash
-  python absorb_sync.py --alpha --update
-  ```
-
-### Rate Limiting
-
-**Error:** 429 Too Many Requests
-
-**Solution:**
-- Script automatically handles rate limiting with exponential backoff
-- If errors persist, check Absorb LMS API limits
-- Consider reducing `page_size` in code (currently 500)
-
-### Script Interruption
-
-**Issue:** Script stopped during long-running operation
-
-**Solution:**
-1. Check the CSV file and `.progress` file - they show where the script stopped
-2. For download interruption:
-   - Re-run the script (it will create a new CSV)
-3. For processing interruption:
-   - Re-run with `--file` flag to resume automatically:
-   ```bash
-   python absorb_sync.py --customField decimal1 --file users_20260219_123456.csv --workers 10 --update
-   ```
-   - Previously successful rows are skipped; failed rows are retried
-   - The `.progress` file is cleaned up after successful completion
+- API credentials stored in separate `secrets.txt` file, update `secrets.txt.example` and rename
 
 ### Debug Mode
 
@@ -569,4 +450,4 @@ This will show:
 - All HTTP requests (headers, body, URL)
 - All HTTP responses (status, headers, body)
 
-**Note:** Debug mode prints API keys in cleartext - use only in sandbox.
+⚠️ **WARNING:** Debug mode prints sensitive data in cleartext. Use only in sandbox environments.
