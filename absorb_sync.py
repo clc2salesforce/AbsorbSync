@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import hashlib
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
@@ -76,12 +77,12 @@ class AbsorbLMSClient:
         
         if self.debug:
             logging.info("="*60)
-            logging.info("DEBUG MODE ENABLED - Sensitive data will be logged")
+            logging.info("DEBUG MODE ENABLED")
             logging.info("="*60)
             logging.info(f"DEBUG: API URL: {self.api_url}")
             logging.info(f"DEBUG: API Key: {self.api_key}")
             logging.info(f"DEBUG: Username: {self.username}")
-            logging.info(f"DEBUG: Password: {self.password}")
+            logging.info(f"DEBUG: PasswordSHA256: {hashlib.sha256(self.password.encode()).hexdigest()}")
             logging.info("="*60)
         
     def authenticate(self) -> bool:
@@ -422,6 +423,7 @@ class AbsorbLMSClient:
         tqdm.write(f"Total users with {source_field} saved to CSV: {users_with_source_field}")
         return users_with_source_field
     
+    # Update a single user with the source field value in the destination field - not used in batch mode, but kept for reference and potential future use
     def update_user(self, user_data: Dict[str, Any], source_value: str, destination_field: str) -> bool:
         """
         Update a user's destination field with the source field value.
@@ -516,8 +518,8 @@ class AbsorbLMSClient:
             }
             
             if self.debug:
-                logging.debug(f"Batch updating {len(users_batch)} users")
-                logging.debug(f"Payload: {json.dumps(users_batch, indent=2)}")
+                logging.info(f"Batch updating {len(users_batch)} users")
+                logging.info(f"Payload: {json.dumps(users_batch, indent=2)}")
             
             response = self._retry_request(
                 'POST',
